@@ -1,0 +1,75 @@
+# ── Maven build output ───────────────────────────────────────────────
+# Everything in this project is generated under target/ by `mvn package`
+# (compiled classes, the shaded provider JAR, surefire/failsafe reports).
+target/
+
+# Other Maven-generated artifacts
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.flattened-pom.xml
+
+# Maven wrapper (none committed today; ignore the downloaded jar if one is added)
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# ── Java / JVM ───────────────────────────────────────────────────────
+*.class
+hs_err_pid*
+replay_pid*
+*.hprof
+.claude
+
+# ── IDEs ─────────────────────────────────────────────────────────────
+# IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Eclipse
+.classpath
+.project
+.settings/
+.factorypath
+bin/
+
+# NetBeans
+nbproject/private/
+nbactions.xml
+nb-configuration.xml
+
+# VS Code
+.vscode/
+
+# ── OS noise ─────────────────────────────────────────────────────────
+# macOS
+.DS_Store
+# Windows
+Thumbs.db
+Desktop.ini
+
+# ── LWS runtime & local config ───────────────────────────────────────
+# Server state: TDB2 dataset, binary blobs, webhook signing keys.
+lws-data/
+# Local runtime configuration may contain owner WebIDs / OIDC secrets.
+/lws.properties
+# Transient smoke-test artifacts.
+*.err
+cp.txt
+note.ttl
+patch.rq
+sub.json
+locked.acl.ttl
+
+# ── Logs & local environment ─────────────────────────────────────────
+*.log
+# Demo scripts read admin/user credentials from the environment; never commit a
+# local file that captures them.
+.env
+.env.local

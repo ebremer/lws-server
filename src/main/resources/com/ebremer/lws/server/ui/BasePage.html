@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html xmlns:wicket="http://wicket.apache.org">
+<head>
+    <meta charset="utf-8"/>
+    <title>LWS Storage</title>
+    <style>
+        body { font-family: system-ui, sans-serif; margin: 0; color: #1a1a1a; }
+        .topbar { background: #114488; color: #fff; padding: 0.6rem 1.2rem; display: flex; gap: 1rem; align-items: baseline; }
+        .topbar a { color: #cfe0ff; text-decoration: none; }
+        .topbar .grow { flex: 1; }
+        .content { margin: 1.5rem; }
+        h2 { margin-top: 1.5rem; }
+        .muted { color: #888; }
+        .kind { color: #888; font-size: 0.85em; margin-left: 0.4rem; }
+        pre, textarea { background: #f5f5f5; padding: 0.75rem; border-radius: 6px; width: 90%; font-family: monospace; }
+        textarea { border: 1px solid #ccc; }
+        .feedbackPanelINFO, .feedbackPanelSUCCESS { color: #0a6; }
+        .feedbackPanelERROR { color: #a00; }
+        .box { border: 1px solid #e0e0e0; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+        button { padding: 0.3rem 0.8rem; }
+        .del { color: #a00; margin-left: 0.6rem; font-size: 0.85em; }
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <a wicket:id="home"><b>LWS Storage</b></a>
+        <span class="grow"></span>
+        <span>Signed in as: <b wicket:id="principal">anonymous</b></span>
+        <a wicket:id="signin">Sign in</a>
+        <a wicket:id="signout">Sign out</a>
+    </div>
+    <div class="content">
+        <div wicket:id="feedback"></div>
+        <wicket:child/>
+    </div>
+</body>
+</html>

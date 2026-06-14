@@ -1,0 +1,227 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.ebremer</groupId>
+    <artifactId>lws-server</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>LWS Server</name>
+    <description>Linked Web Storage server implementing the W3C LWS Protocol</description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.release>25</maven.compiler.release>
+        <exec.mainClass>com.ebremer.lws.server.LwsServer</exec.mainClass>
+
+        <!-- Spring Boot is used ONLY to bootstrap embedded Jetty. Keep its surface area tiny:
+             when removing it later, only the bootstrap module and this version pin change. -->
+        <spring-boot.version>3.5.13</spring-boot.version>
+
+        <jena.version>5.6.0</jena.version>
+        <shiro.version>2.2.0</shiro.version>
+        <pac4j.version>6.1.2</pac4j.version>
+        <jakartaee-pac4j.version>8.0.1</jakartaee-pac4j.version>
+        <oauth-oidc-sdk.version>11.23.1</oauth-oidc-sdk.version>
+        <wicket.version>10.8.0</wicket.version>
+        <acme4j.version>5.1.0</acme4j.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Spring Boot BOM imported (NOT used as parent) so the build stays portable
+                 and aligned with whatever Jetty/Jackson/SLF4J versions Spring Boot 3.5.13 ships. -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- Jena 5.6.0 needs commons-lang3 >= 3.18 (BasicThreadFactory.builder()), but the
+                 Spring Boot BOM pins 3.17.0. A direct management entry wins over the imported BOM. -->
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-lang3</artifactId>
+                <version>3.18.0</version>
+            </dependency>
+
+            <!-- Align all Bouncy Castle modules: acme4j 5.1.0 pulls bcpkix/bcutil 1.83 while another
+                 dependency pins bcprov 1.80; bcpkix 1.83 expects the matching bcprov, so lift them
+                 all to 1.83 to avoid a split-version NoSuchMethodError at runtime. -->
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcprov-jdk18on</artifactId>
+                <version>1.83</version>
+            </dependency>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcpkix-jdk18on</artifactId>
+                <version>1.83</version>
+            </dependency>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcutil-jdk18on</artifactId>
+                <version>1.83</version>
+            </dependency>
+
+            <!-- Align every pac4j core module to one version. jakartaee-pac4j 8.0.1 defaults to
+                 pac4j 6.0.2 transitively; we lift it to 6.1.2 to match pac4j-oidc/pac4j-jwt. -->
+            <dependency>
+                <groupId>org.pac4j</groupId>
+                <artifactId>pac4j-core</artifactId>
+                <version>${pac4j.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.pac4j</groupId>
+                <artifactId>pac4j-jakartaee</artifactId>
+                <version>${pac4j.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.pac4j</groupId>
+                <artifactId>pac4j-oidc</artifactId>
+                <version>${pac4j.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.pac4j</groupId>
+                <artifactId>pac4j-jwt</artifactId>
+                <version>${pac4j.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!-- ===== Bootstrap: minimal Spring Boot footprint (embedded Jetty only) ===== -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Embedded Jetty 12 (Jakarta Servlet 6). This is the future bare-Jetty target. -->
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jetty</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Required so Spring Boot deduces a SERVLET application and boots the embedded
+                 container. Pulls spring-web only (NO Spring MVC / DispatcherServlet). -->
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-web</artifactId>
+        </dependency>
+
+        <!-- ===== RDF: Apache Jena + TDB2 (metadata store; any SPARQL endpoint pluggable) ===== -->
+        <dependency>
+            <groupId>org.apache.jena</groupId>
+            <artifactId>jena-tdb2</artifactId>
+            <version>${jena.version}</version>
+        </dependency>
+        <dependency>
+            <!-- RDFConnection: one API over a local TDB2 dataset OR a remote SPARQL service. -->
+            <groupId>org.apache.jena</groupId>
+            <artifactId>jena-rdfconnection</artifactId>
+            <version>${jena.version}</version>
+        </dependency>
+        <dependency>
+            <!-- Embeddable Fuseki: optional, opt-in SPARQL endpoint over the local TDB2 dataset. -->
+            <groupId>org.apache.jena</groupId>
+            <artifactId>jena-fuseki-main</artifactId>
+            <version>${jena.version}</version>
+        </dependency>
+
+        <!-- ===== AuthN/AuthZ: Apache Shiro (core only) + pac4j (Jakarta) ===== -->
+        <dependency>
+            <!-- shiro-core has no servlet dependency, so it is Jakarta/Javax neutral.
+                 We bind the Shiro Subject to each request inside our own Jakarta filter. -->
+            <groupId>org.apache.shiro</groupId>
+            <artifactId>shiro-core</artifactId>
+            <version>${shiro.version}</version>
+        </dependency>
+        <dependency>
+            <!-- Jakarta EE web integration for pac4j (JEEContext, SecurityFilter, CallbackFilter). -->
+            <groupId>org.pac4j</groupId>
+            <artifactId>jakartaee-pac4j</artifactId>
+            <version>${jakartaee-pac4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.pac4j</groupId>
+            <artifactId>pac4j-oidc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.pac4j</groupId>
+            <artifactId>pac4j-jwt</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Nimbus OAuth2/OIDC SDK: OIDC discovery + JWKS + JWT verification used directly
+                 by the LWS OpenID credential validator. Pinned to pac4j-oidc's own version. -->
+            <groupId>com.nimbusds</groupId>
+            <artifactId>oauth2-oidc-sdk</artifactId>
+            <version>${oauth-oidc-sdk.version}</version>
+        </dependency>
+
+        <!-- ===== UI: Apache Wicket ===== -->
+        <dependency>
+            <groupId>org.apache.wicket</groupId>
+            <artifactId>wicket-core</artifactId>
+            <version>${wicket.version}</version>
+        </dependency>
+
+        <!-- ===== TLS: ACME (Let's Encrypt) certificate provisioning for the bare-Jetty launcher ===== -->
+        <dependency>
+            <groupId>org.shredzone.acme4j</groupId>
+            <artifactId>acme4j-client</artifactId>
+            <version>${acme4j.version}</version>
+        </dependency>
+
+        <!-- ===== Caching: Caffeine — bounded, TTL-evicting in-process caches (auth, ACME). Version
+             from the Spring Boot BOM (Spring's own caching abstraction uses Caffeine). ===== -->
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
+
+        <!-- ===== Test ===== -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- WicketTester (extracted from wicket-core in Wicket 10) for UI unit tests. -->
+            <groupId>org.apache.wicket</groupId>
+            <artifactId>wicket-tester</artifactId>
+            <version>${wicket.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>lws-server</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <release>${maven.compiler.release}</release>
+                </configuration>
+            </plugin>
+            <plugin>
+                <!-- The ONLY Spring-specific build element. Produces an executable jar and enables
+                     `mvn spring-boot:run`. When migrating to bare Jetty, replace with shade/assembly. -->
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <version>${spring-boot.version}</version>
+                <configuration>
+                    <mainClass>${exec.mainClass}</mainClass>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

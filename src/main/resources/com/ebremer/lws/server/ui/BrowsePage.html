@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html xmlns:wicket="http://wicket.apache.org">
+<head><meta charset="utf-8"/><title>Browse</title></head>
+<body>
+<wicket:extend>
+    <div class="crumb muted">Path: <span wicket:id="crumb">/</span></div>
+
+    <div wicket:id="errorBox" class="box">
+        <p class="feedbackPanelERROR" wicket:id="errorMsg"></p>
+        <p class="muted">You may need to <a href="login">sign in</a> with sufficient permissions.</p>
+    </div>
+
+    <!-- Container -->
+    <div wicket:id="containerBox">
+        <h2>Container <span wicket:id="cpath"></span></h2>
+        <ul>
+            <li wicket:id="items">
+                <a wicket:id="link"><span wicket:id="name">name</span></a>
+                <span class="kind" wicket:id="kind">kind</span>
+                <a class="del" wicket:id="del">delete</a>
+            </li>
+        </ul>
+        <p wicket:id="empty" class="muted">(empty container)</p>
+
+        <form wicket:id="createForm" class="box">
+            <h3>Create resource</h3>
+            <p>Name: <input type="text" wicket:id="newName" placeholder="(optional slug)"/>
+               &nbsp; Type: <select wicket:id="newType"></select></p>
+            <p>Content (RDF Turtle or text):</p>
+            <textarea wicket:id="newContent" rows="6"></textarea>
+            <p>…or upload a file <span class="muted">(creates a binary resource; overrides type/content)</span>:
+               <input type="file" wicket:id="newFile"/></p>
+            <p><button type="submit">Create</button></p>
+        </form>
+    </div>
+
+    <!-- RDF resource -->
+    <div wicket:id="rdfBox">
+        <h2>RDF resource <span wicket:id="rpath"></span></h2>
+        <pre wicket:id="rdfView"></pre>
+        <form wicket:id="editForm">
+            <textarea wicket:id="turtle" rows="12"></textarea>
+            <p><button type="submit">Save</button></p>
+        </form>
+        <p><a class="del" wicket:id="deleteRdf">Delete this resource</a></p>
+    </div>
+
+    <!-- Non-RDF resource -->
+    <div wicket:id="binaryBox">
+        <h2>Data resource <span wicket:id="bpath"></span></h2>
+        <p>Type: <span wicket:id="ctype"></span> &mdash; Size: <span wicket:id="bsize"></span> bytes</p>
+        <p><a wicket:id="download">Download</a></p>
+        <form wicket:id="replaceForm">
+            <p>Replace with file: <input type="file" wicket:id="replaceFile"/> <button type="submit">Replace</button></p>
+        </form>
+        <p><a class="del" wicket:id="deleteBin">Delete this resource</a></p>
+    </div>
+
+    <!-- ACL editor (WAC + Control) -->
+    <div wicket:id="aclBox" class="box">
+        <h2>Access control (WAC)</h2>
+        <form wicket:id="aclForm">
+            <textarea wicket:id="aclArea" rows="12"></textarea>
+            <p><button type="submit">Save ACL</button></p>
+        </form>
+        <p><a class="del" wicket:id="deleteAcl">Remove ACL</a></p>
+    </div>
+</wicket:extend>
+</body>
+</html>

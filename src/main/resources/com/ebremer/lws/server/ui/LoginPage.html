@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html xmlns:wicket="http://wicket.apache.org">
+<head><meta charset="utf-8"/><title>Sign in</title></head>
+<body>
+<wicket:extend>
+    <h2>Sign in</h2>
+
+    <div class="box">
+        <form wicket:id="devForm">
+            <h3>Developer sign-in</h3>
+            <p class="muted">Act as any WebID (impersonation) — development only.</p>
+            <p>WebID: <input type="text" wicket:id="webId" size="55" placeholder="https://alice.example/profile#me"/></p>
+            <p><button type="submit">Sign in</button> <span class="muted">(leave blank to browse anonymously)</span></p>
+        </form>
+        <p wicket:id="devDisabled" class="muted"></p>
+    </div>
+
+    <div class="box">
+        <form wicket:id="tokenForm">
+            <h3>Sign in with an OpenID Connect ID token</h3>
+            <p class="muted">Validated against the issuer's JWKS, exactly like the HTTP API.</p>
+            <textarea wicket:id="token" rows="4"></textarea>
+            <p><button type="submit">Sign in with token</button></p>
+        </form>
+    </div>
+
+    <div class="box" wicket:id="oidcBox">
+        <h3>Single sign-on</h3>
+        <p><a wicket:id="oidcLogin">Sign in with OpenID Connect</a></p>
+    </div>
+</wicket:extend>
+</body>
+</html>
