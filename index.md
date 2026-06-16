@@ -57,3 +57,5 @@ fine-grained access rules) decide who may do what.
 > the LDP / Solid conventions it derives from (trailing-slash containers, `Link: rel="type"`
 > interaction models, content negotiation, conditional requests). Because the source is in flux, some
 > details may change.
+
+
