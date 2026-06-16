@@ -6,19 +6,24 @@ in this repository; this README is for maintaining the site itself.
 
 ## Publish on GitHub Pages
 
-1. Push this repository to GitHub.
-2. **Settings → Pages → Build and deployment → Source: _GitHub Actions_.**
-3. The included workflow ([`.github/workflows/pages.yml`](.github/workflows/pages.yml)) builds the
-   site with Jekyll 4 + Just the Docs and deploys it on every push to `main`.
+1. Push this repository to GitHub (default branch `main`).
+2. **Settings → Pages → Build and deployment → Source: _Deploy from a branch_ → Branch: `main` →
+   `/ (root)`.**
+3. GitHub builds the site with its classic Jekyll builder and serves it at
+   `https://<user>.github.io/lws-server-docs/`.
 
-> The workflow path is used (rather than “Deploy from a branch”) because current Just the Docs
-> requires Jekyll 4, while GitHub’s classic branch build pins Jekyll 3.9.
+The Just the Docs theme is pulled via `remote_theme` (pinned to a version compatible with GitHub's
+classic Jekyll build), so no theme gem or custom build workflow is required.
+
+> **`baseurl`.** [`_config.yml`](_config.yml) sets `baseurl: "/lws-server-docs"` for a project page
+> at `https://<user>.github.io/lws-server-docs/`. If you serve from a **user/org page** or a **custom
+> domain**, set `baseurl` to `""`.
 
 ## Preview locally
 
 ```bash
 bundle install
-bundle exec jekyll serve      # http://localhost:4000/
+bundle exec jekyll serve --baseurl ""    # http://localhost:4000/
 ```
 
 Requires Ruby (3.x) and Bundler.

@@ -1,17 +1,15 @@
 source "https://rubygems.org"
 
-# Jekyll 4 + the Just the Docs theme. The GitHub Actions workflow (.github/workflows/pages.yml)
-# builds the site with these gems; the same set works for local preview:
+# Matches GitHub Pages' classic build ("Deploy from a branch"): the github-pages gem pins the exact
+# Jekyll + plugin versions GitHub runs, and bundles jekyll-remote-theme (used to pull Just the Docs)
+# and jekyll-relative-links. The theme itself is set via `remote_theme:` in _config.yml.
+#
+# Local preview (serve at the site root rather than the /lws-server-docs baseurl):
 #
 #   bundle install
-#   bundle exec jekyll serve     # http://localhost:4000/
+#   bundle exec jekyll serve --baseurl ""    # http://localhost:4000/
 #
-gem "jekyll", "~> 4.3"
-gem "just-the-docs", "~> 0.10"
+gem "github-pages", group: :jekyll_plugins
 
-group :jekyll_plugins do
-  gem "jekyll-relative-links", "~> 0.7"
-end
-
-# Windows / JRuby helpers (harmless elsewhere).
+# Local server helper for Ruby 3.x (webrick is no longer bundled with Ruby).
 gem "webrick", "~> 1.8"

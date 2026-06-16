@@ -5,14 +5,17 @@ description: >-
   Apache Jena/TDB2 storage, four authentication suites, WAC, notifications, search and more.
 lang: en
 
-# Theme (built by the included GitHub Actions workflow with Jekyll 4 and the just-the-docs gem).
-theme: just-the-docs
+# Theme: Just the Docs pulled via remote_theme, pinned to a version compatible with GitHub Pages'
+# classic build (the "Deploy from a branch" source, which runs Jekyll 3.10 via the github-pages gem).
+remote_theme: just-the-docs/just-the-docs@v0.5.4
 
-# url/baseurl are injected by the Pages workflow (actions/configure-pages); leave unset for local
-# preview at http://localhost:4000/. If you instead deploy from a branch, set baseurl to your
-# project-page path, e.g. baseurl: "/lws-server-docs".
+# baseurl is the path the site is served under. For a project page at
+# https://<user>.github.io/lws-server-docs/ keep "/lws-server-docs". For a user/org page or a custom
+# domain set it to "". For local preview: bundle exec jekyll serve --baseurl ""
+baseurl: "/lws-server-docs"
 
 plugins:
+  - jekyll-remote-theme
   - jekyll-relative-links   # lets inline links to other .md files resolve on the built site
 
 # ----- Just the Docs options -----
