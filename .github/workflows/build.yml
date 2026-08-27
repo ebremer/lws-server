@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           # maven.compiler.release=25; the build emits class-file major 69 and will not run on less.
           java-version: '25'
