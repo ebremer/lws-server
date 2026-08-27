@@ -42,7 +42,7 @@
              when removing it later, only the bootstrap module and this version pin change. -->
         <spring-boot.version>3.5.13</spring-boot.version>
 
-        <jena.version>5.6.0</jena.version>
+        <jena.version>6.2.0</jena.version>
         <pac4j.version>6.1.2</pac4j.version>
         <jakartaee-pac4j.version>8.0.1</jakartaee-pac4j.version>
         <oauth-oidc-sdk.version>11.23.1</oauth-oidc-sdk.version>
