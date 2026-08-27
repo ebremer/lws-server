@@ -38,7 +38,13 @@ public final class Base58 {
             num = num.multiply(BASE).add(BigInteger.valueOf(digit));
         }
         byte[] bytes = num.toByteArray();
-        int from = (bytes.length > 1 && bytes[0] == 0) ? 1 : 0; // drop sign byte
+        // BigInteger.toByteArray() never returns fewer than one byte, and prepends 0x00 whenever the
+        // top bit of the first significant byte would otherwise read as a sign bit. Both are
+        // artefacts of that encoding rather than data — and for a value of ZERO the whole array is
+        // the artefact. The old test only skipped the sign byte when the array was longer than one,
+        // so decoding "1" (a single zero byte) produced TWO zero bytes and the round trip broke on
+        // exactly the input a leading-zero-preserving encoding exists to carry.
+        int from = num.signum() == 0 ? bytes.length : (bytes[0] == 0 ? 1 : 0);
         int zeros = 0;
         while (zeros < input.length() && input.charAt(zeros) == '1') {
             zeros++;

@@ -17,6 +17,8 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
 import org.apache.jena.query.ParameterizedSparqlString;
 import org.apache.jena.rdfconnection.RDFConnection;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.ebremer.lws.server.rdf.RdfStore;
 import com.ebremer.lws.server.vocab.LWS;
 
@@ -54,8 +56,16 @@ import com.ebremer.lws.server.vocab.LWS;
  */
 public final class SearchIndexService implements ResourceEventListener {
 
+    private static final Logger log = LoggerFactory.getLogger(SearchIndexService.class);
+
     private final RdfStore rdfStore;
     private final Authorizer authorizer;
+    /**
+     * The resource metadata a client writes, which may declare types of its own (lws10-searchindex
+     * treats {@code Link: rel="type"} as the preferred type source). Optional: a search index with no
+     * linkset service simply indexes the structural and content-asserted types, as it always did.
+     */
+    private volatile LinksetService linksets;
 
     // Derived index: resource IRI -> its type set (structural + content-asserted). Built lazily by a
     // full scan and maintained incrementally by onResourceEvent. This is a complete materialized view,
@@ -71,6 +81,54 @@ public final class SearchIndexService implements ResourceEventListener {
     public SearchIndexService(RdfStore rdfStore, Authorizer authorizer) {
         this.rdfStore = rdfStore;
         this.authorizer = authorizer;
+    }
+
+    /**
+     * Supply the metadata service whose client-declared types this index should include.
+     *
+     * <p>Set after construction because the two are mutually dependent: the linkset service is built
+     * on top of the resource service, which is built with the authorizer this index also takes.
+     */
+    public void setLinksets(LinksetService linksets) {
+        this.linksets = linksets;
+    }
+
+    /**
+     * Recompute one resource's types after its metadata changed. Called by {@link LinksetService}
+     * once its write has committed; without it a declared type would not appear in a search until
+     * something else touched the resource.
+     */
+    public void onMetadataChanged(String iri) {
+        synchronized (buildLock) {
+            if (!built) {
+                return;
+            }
+            try {
+                Set<String> types = rdfStore.read(conn -> loadTypesFor(conn, iri, structuralOf(conn, iri)));
+                if (types.isEmpty()) {
+                    typeCache.remove(iri);
+                } else {
+                    typeCache.put(iri, Set.copyOf(types));
+                }
+            } catch (RuntimeException e) {
+                built = false;
+                log.warn("Type index update failed for {} after a metadata change; the index will be "
+                        + "rebuilt on next use: {}", iri, e.toString());
+            }
+        }
+    }
+
+    /** A resource's structural type as the registry records it, or null if it is not registered. */
+    private static ResourceType structuralOf(RDFConnection conn, String iri) {
+        ParameterizedSparqlString q = new ParameterizedSparqlString();
+        q.setCommandText("SELECT ?t WHERE { GRAPH ?g { ?s a ?t } } LIMIT 1");
+        q.setIri("g", ResourceRegistry.ADMIN_GRAPH);
+        q.setIri("s", iri);
+        ResourceType[] holder = new ResourceType[1];
+        conn.querySelect(q.asQuery(), row ->
+                holder[0] = row.getResource("t").getURI().equals(LWS.Container.getURI())
+                        ? ResourceType.CONTAINER : ResourceType.RDF_SOURCE);
+        return holder[0];
     }
 
     /** One conjunct of a query: the resource must bear at least one of {@code anyOf}. */
@@ -120,17 +178,37 @@ public final class SearchIndexService implements ResourceEventListener {
 
     /** The distinct resource types visible to {@code principal}, as a paginated list of type IRIs. */
     public Page<String> typeIndex(LwsPrincipal principal, int page, int pageSize) {
+        // Same shape as a container listing and the same cost: one authorization decision per
+        // indexed resource, on an endpoint that takes no filter to bound it. Where the answer cannot
+        // vary by resource, skip the loop (findings M23/M39 applied to the second branch).
+        boolean all = authorizer.allowsEverything(principal, AclMode.READ);
         TreeSet<String> visible = new TreeSet<>();
         for (Map.Entry<String, Set<String>> e : typeView().entrySet()) {
-            if (authorizer.allows(principal, e.getKey(), AclMode.READ)) {
+            if (all || authorizer.allows(principal, e.getKey(), AclMode.READ)) {
                 visible.addAll(e.getValue());
             }
         }
         return paginate(new ArrayList<>(visible), page, pageSize);
     }
 
-    /** The resources matching {@code filter} that {@code principal} may read, paginated. */
+    /**
+     * The resources matching {@code filter} that {@code principal} may read, paginated.
+     *
+     * <p>A filter with no type clause is refused. lws10-searchindex makes the type clause the
+     * mandatory baseline of a type search — it is what {@link Clause#type} already calls itself, and
+     * what this class's own javadoc has always said — but nothing enforced it: {@code GET
+     * /.lws/type-search} with no parameters at all produced {@link Filter#MATCH_ALL}, which
+     * {@link #matches} satisfies vacuously, so the endpoint enumerated every resource in the storage
+     * the caller could read. That is not a disclosure bug (each match is authorization-filtered and
+     * {@code totalItems} counts only the permitted view) but it is a search endpoint answering
+     * "everything", and every such request costs one authorization decision per resource in the
+     * store.
+     */
     public Page<Match> typeSearch(LwsPrincipal principal, Filter filter, int page, int pageSize) {
+        if (filter.clauses().stream().noneMatch(Clause::isType)) {
+            throw LwsException.badRequest(
+                    "A type search requires at least one \"type\" clause naming the types to match");
+        }
         Map<String, Set<String>> typesByResource = typeView();
         Set<String> relationPredicates = filter.clauses().stream()
                 .filter(c -> !c.isType() && isAbsoluteUri(c.relation()))
@@ -140,12 +218,16 @@ public final class SearchIndexService implements ResourceEventListener {
                 ? Map.of()
                 : rdfStore.read(conn -> loadRelations(conn, relationPredicates, typesByResource.keySet()));
 
+        boolean all = authorizer.allowsEverything(principal, AclMode.READ);
         List<Match> matches = new ArrayList<>();
         for (Map.Entry<String, Set<String>> e : typesByResource.entrySet()) {
             String iri = e.getKey();
             Set<String> types = e.getValue();
+            // The filter first, deliberately: it is a set operation over an in-memory map, so the
+            // authorization decision — the expensive half — is only reached for a resource that
+            // would otherwise have been returned.
             if (matches(filter, iri, types, relations)
-                    && authorizer.allows(principal, iri, AclMode.READ)) {
+                    && (all || authorizer.allows(principal, iri, AclMode.READ))) {
                 matches.add(new Match(iri, orderTypes(types)));
             }
         }
@@ -239,11 +321,22 @@ public final class SearchIndexService implements ResourceEventListener {
             if (!built) {
                 return;
             }
-            if (event.kind() == ActivityKind.DELETE) {
-                typeCache.remove(event.iri());
-            } else {
-                Set<String> types = rdfStore.read(conn -> loadTypesFor(conn, event.iri(), event.type()));
-                typeCache.put(event.iri(), Set.copyOf(types));
+            try {
+                if (event.kind() == ActivityKind.DELETE) {
+                    typeCache.remove(event.iri());
+                } else {
+                    Set<String> types = rdfStore.read(conn -> loadTypesFor(conn, event.iri(), event.type()));
+                    typeCache.put(event.iri(), Set.copyOf(types));
+                }
+            } catch (RuntimeException e) {
+                // The fan-out swallows what escapes here, so an update that failed would otherwise
+                // leave this one resource wrong in the cache for the life of the process: `built` is
+                // a one-way latch and nothing ever revisits it. Drop the whole index instead and let
+                // the next read rebuild it from the store — the expensive, always-correct answer is
+                // strictly better than a cheap permanently-wrong one.
+                built = false;
+                log.warn("Type index update failed for {}; the index will be rebuilt on next use: {}",
+                        event.iri(), e.toString());
             }
         }
     }
@@ -271,6 +364,18 @@ public final class SearchIndexService implements ResourceEventListener {
                 rt.add(row.getResource("t").getURI());
             }
         });
+
+        // And the types the client declared in the resource's own metadata, which is the
+        // searchindex spec's preferred source and the only one a binary resource has.
+        LinksetService meta = linksets;
+        if (meta != null) {
+            meta.allDeclaredTypes(conn).forEach((iri, declared) -> {
+                Set<String> rt = types.get(iri);
+                if (rt != null) {
+                    rt.addAll(declared);
+                }
+            });
+        }
         return types;
     }
 
@@ -288,6 +393,10 @@ public final class SearchIndexService implements ResourceEventListener {
                 }""");
         q.setIri("g", iri);
         conn.querySelect(q.asQuery(), row -> types.add(row.getResource("t").getURI()));
+        LinksetService meta = linksets;
+        if (meta != null) {
+            types.addAll(meta.declaredTypes(conn, iri));
+        }
         return types;
     }
 

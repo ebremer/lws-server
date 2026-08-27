@@ -27,11 +27,14 @@ import org.apache.wicket.request.mapper.parameter.PageParameters;
 import org.apache.wicket.util.lang.Bytes;
 import com.ebremer.lws.server.LwsConfiguration;
 import com.ebremer.lws.server.auth.WacAclService;
+import com.ebremer.lws.server.core.IfMatch;
+import com.ebremer.lws.server.core.IfNoneMatch;
 import com.ebremer.lws.server.core.Iris;
 import com.ebremer.lws.server.core.LwsException;
 import com.ebremer.lws.server.core.LwsPrincipal;
 import com.ebremer.lws.server.core.LwsResource;
 import com.ebremer.lws.server.core.ResourceService;
+import com.ebremer.lws.server.core.ResourceRegistry;
 import com.ebremer.lws.server.core.ResourceService.ReadResult;
 import com.ebremer.lws.server.core.ResourceService.TypeHint;
 import com.ebremer.lws.server.core.ResourceService.WriteRequest;
@@ -75,6 +78,11 @@ public final class BrowsePage extends BasePage {
         boolean isRdf = rr != null && rr.meta().type() == ResourceType.RDF_SOURCE;
         boolean isBinary = rr != null && rr.meta().type() == ResourceType.NON_RDF_SOURCE;
         boolean canWrite = rr != null && rs.canWrite(me, iri);
+        // Distinct from canWrite since M8 split the two: an access grant naming only the ODRL action
+        // "modify" authorizes editing and not removal, so a delete control shown on that authority
+        // would offer an action the service then refuses. Under WAC and owner-based authorization the
+        // two answers coincide.
+        boolean canDelete = rr != null && rs.canDelete(me, iri);
         boolean canAppend = isContainer && rs.canAppend(me, iri);
         boolean canControl = rr != null && acl != null && rs.canControl(me, iri);
 
@@ -88,7 +96,7 @@ public final class BrowsePage extends BasePage {
         WebMarkupContainer containerBox = new WebMarkupContainer("containerBox");
         containerBox.setVisible(isContainer);
         containerBox.add(new Label("cpath", path));
-        List<Item> items = isContainer ? children(rr.rdf(), iri, cfg) : List.of();
+        List<Item> items = isContainer ? children(rr.children(), cfg) : List.of();
         final String here = path;
         containerBox.add(new ListView<Item>("items", items) {
             @Override
@@ -99,13 +107,18 @@ public final class BrowsePage extends BasePage {
                 link.add(new Label("name", it.name()));
                 li.add(link);
                 li.add(new Label("kind", it.kind()));
-                Link<Void> del = new Link<>("del") {
+                Form<Void> del = new Form<>("del") {
                     @Override
-                    public void onClick() {
+                    protected void onSubmit() {
                         deleteAndReturn(it.path(), here);
                     }
                 };
-                del.setVisible(canWrite);
+                // The member's own delete permission, not the container's write permission. It was
+                // gated on `canWrite` over the *container*, which is the wrong resource and — since
+                // M8 split modify from delete — the wrong mode as well. Whether a control is shown
+                // is not authorization (finding M11): `deleteAndReturn` goes through the service,
+                // which decides again.
+                del.setVisible(rs.canDelete(me, cfg.baseUri() + it.path()));
                 li.add(del);
             }
         });
@@ -139,22 +152,26 @@ public final class BrowsePage extends BasePage {
         String turtle = isRdf ? RdfIO.writeString(rr.rdf(), RDFFormat.TURTLE_PRETTY) : "";
         rdfBox.add(new Label("rdfView", turtle).setVisible(isRdf && !canWrite));
         IModel<String> editModel = Model.of(turtle);
+        // The tag of the version this page is showing. Saving quotes it back, so a save from a page
+        // rendered before someone else's change is refused rather than silently overwriting it
+        // (finding M20) — the console is held to the same conditional-write rule as the HTTP API.
+        final String renderedEtag = rr.meta().etag();
         Form<Void> editForm = new Form<>("editForm") {
             @Override
             protected void onSubmit() {
-                putRdf(here, editModel.getObject());
+                putRdf(here, editModel.getObject(), renderedEtag);
             }
         };
         editForm.add(new TextArea<>("turtle", editModel));
         editForm.setVisible(canWrite);
         rdfBox.add(editForm);
-        Link<Void> deleteRdf = new Link<>("deleteRdf") {
+        Form<Void> deleteRdf = new Form<>("deleteRdf") {
             @Override
-            public void onClick() {
+            protected void onSubmit() {
                 deleteAndReturn(here, parentOf(here));
             }
         };
-        deleteRdf.setVisible(canWrite);
+        deleteRdf.setVisible(canDelete);
         rdfBox.add(deleteRdf);
         add(rdfBox);
 
@@ -166,10 +183,11 @@ public final class BrowsePage extends BasePage {
         binaryBox.add(new Label("bsize", isBinary ? String.valueOf(rr.meta().size()) : ""));
         binaryBox.add(new ExternalLink("download", iri));
         FileUploadField replaceFile = new FileUploadField("replaceFile");
+        final String binaryEtag = rr.meta().etag();
         Form<Void> replaceForm = new Form<>("replaceForm") {
             @Override
             protected void onSubmit() {
-                replaceBinary(here, replaceFile.getFileUploads());
+                replaceBinary(here, replaceFile.getFileUploads(), binaryEtag);
             }
         };
         replaceForm.setMultiPart(true);
@@ -177,13 +195,13 @@ public final class BrowsePage extends BasePage {
         replaceForm.add(replaceFile);
         replaceForm.setVisible(canWrite);
         binaryBox.add(replaceForm);
-        Link<Void> deleteBin = new Link<>("deleteBin") {
+        Form<Void> deleteBin = new Form<>("deleteBin") {
             @Override
-            public void onClick() {
+            protected void onSubmit() {
                 deleteAndReturn(here, parentOf(here));
             }
         };
-        deleteBin.setVisible(canWrite);
+        deleteBin.setVisible(canDelete);
         binaryBox.add(deleteBin);
         add(binaryBox);
 
@@ -193,17 +211,22 @@ public final class BrowsePage extends BasePage {
         final String targetIri = iri;
         String aclInitial = canControl ? aclTurtle(acl, targetIri, me) : "";
         IModel<String> aclModel = Model.of(aclInitial);
+        // The version of the ACL this page rendered. Replacing an ACL names the version it replaces,
+        // exactly as replacing a resource does (prior-review finding 13) — and the console has to
+        // send it too, or the rule would govern the HTTP API and nothing else, which is how two
+        // console users silently overwrote each other's resource edits (finding M20).
+        final String aclEtag = canControl && acl != null ? acl.aclEtag(targetIri) : null;
         Form<Void> aclForm = new Form<>("aclForm") {
             @Override
             protected void onSubmit() {
-                saveAcl(targetIri, here, aclModel.getObject());
+                saveAcl(targetIri, here, aclModel.getObject(), aclEtag);
             }
         };
         aclForm.add(new TextArea<>("aclArea", aclModel));
         aclBox.add(aclForm);
-        Link<Void> deleteAcl = new Link<>("deleteAcl") {
+        Form<Void> deleteAcl = new Form<>("deleteAcl") {
             @Override
-            public void onClick() {
+            protected void onSubmit() {
                 removeAcl(targetIri, here);
             }
         };
@@ -245,21 +268,23 @@ public final class BrowsePage extends BasePage {
         setResponsePage(BrowsePage.class, new PageParameters().add("p", containerPath));
     }
 
-    private void putRdf(String path, String turtle) {
+    private void putRdf(String path, String turtle, String expectedEtag) {
         ResourceService rs = app().resources();
         LwsPrincipal me = principal();
         try {
             rs.put(path, me, new WriteRequest("text/turtle",
                     turtle == null ? new byte[0] : turtle.getBytes(StandardCharsets.UTF_8),
-                    TypeHint.RDF_SOURCE, null));
+                    TypeHint.RDF_SOURCE, null), expected(expectedEtag));
             getSession().success("Saved.");
-        } catch (LwsException | IllegalArgumentException e) {
+        } catch (LwsException e) {
+            getSession().error(writeFailure("Save", e));
+        } catch (IllegalArgumentException e) {
             getSession().error("Save failed: " + e.getMessage());
         }
         setResponsePage(BrowsePage.class, new PageParameters().add("p", path));
     }
 
-    private void replaceBinary(String path, List<FileUpload> files) {
+    private void replaceBinary(String path, List<FileUpload> files, String expectedEtag) {
         ResourceService rs = app().resources();
         LwsPrincipal me = principal();
         if (files == null || files.isEmpty()) {
@@ -268,13 +293,33 @@ public final class BrowsePage extends BasePage {
             FileUpload fu = files.get(0);
             String ct = fu.getContentType() == null ? "application/octet-stream" : fu.getContentType();
             try {
-                rs.put(path, me, new WriteRequest(ct, fu.getBytes(), TypeHint.NON_RDF_SOURCE, null));
+                rs.put(path, me, new WriteRequest(ct, fu.getBytes(), TypeHint.NON_RDF_SOURCE, null),
+                        expected(expectedEtag));
                 getSession().success("Replaced content.");
-            } catch (LwsException | IllegalArgumentException e) {
+            } catch (LwsException e) {
+                getSession().error(writeFailure("Replace", e));
+            } catch (IllegalArgumentException e) {
                 getSession().error("Replace failed: " + e.getMessage());
             }
         }
         setResponsePage(BrowsePage.class, new PageParameters().add("p", path));
+    }
+
+    /** The precondition for replacing the version this page rendered. */
+    private static IfMatch expected(String etag) {
+        return etag == null ? IfMatch.NONE : IfMatch.of("\"" + etag + "\"");
+    }
+
+    /**
+     * A lost update is the one failure a person can act on, so say what happened rather than
+     * showing them a status code: their page is stale and their text is still in the form.
+     */
+    private static String writeFailure(String what, LwsException e) {
+        if (e.status() == 412 || e.status() == 428) {
+            return "This resource changed since you opened it, so " + what.toLowerCase(java.util.Locale.ROOT)
+                    + " was refused. Reload the page and reapply your edit.";
+        }
+        return what + " failed: " + e.getMessage();
     }
 
     private void deleteAndReturn(String path, String returnPath) {
@@ -289,7 +334,7 @@ public final class BrowsePage extends BasePage {
         setResponsePage(BrowsePage.class, new PageParameters().add("p", returnPath));
     }
 
-    private void saveAcl(String targetIri, String returnPath, String turtle) {
+    private void saveAcl(String targetIri, String returnPath, String turtle, String expectedEtag) {
         ResourceService rs = app().resources();
         WacAclService acl = app().aclService();
         LwsPrincipal me = principal();
@@ -300,9 +345,11 @@ public final class BrowsePage extends BasePage {
                 org.apache.jena.rdf.model.Model model = RdfIO.parse(
                         turtle == null ? new byte[0] : turtle.getBytes(StandardCharsets.UTF_8),
                         Lang.TURTLE, targetIri);
-                acl.putAclFor(targetIri, model);
+                acl.putAclFor(principal(), targetIri, model, expected(expectedEtag), IfNoneMatch.NONE);
                 getSession().success("ACL saved.");
             }
+        } catch (LwsException e) {
+            getSession().error(writeFailure("ACL save", e));
         } catch (IllegalArgumentException e) {
             getSession().error("Invalid ACL: " + e.getMessage());
         }
@@ -311,8 +358,14 @@ public final class BrowsePage extends BasePage {
 
     private void removeAcl(String targetIri, String returnPath) {
         WacAclService acl = app().aclService();
-        if (acl != null && !Iris.isRoot(toPath(targetIri, app().config()))) {
-            acl.deleteAclFor(targetIri);
+        // Checked here and not only when the form is rendered: whether a control is *shown* and
+        // whether it may *run* are different questions, and a page instance held in a session
+        // outlives the permission that rendered it. Deleting an ACL drops its target back to
+        // whatever an ancestor's acl:default allows, which is usually more access, not less.
+        if (!app().resources().canControl(principal(), targetIri)) {
+            getSession().error("You do not have Control permission on this resource.");
+        } else if (acl != null && !Iris.isRoot(toPath(targetIri, app().config()))) {
+            acl.deleteAclFor(principal(), targetIri);
             getSession().success("ACL removed.");
         } else {
             getSession().error("The root ACL cannot be removed.");
@@ -322,21 +375,21 @@ public final class BrowsePage extends BasePage {
 
     // ----- helpers -----
 
-    private static List<Item> children(org.apache.jena.rdf.model.Model model, String containerIri, LwsConfiguration cfg) {
+    /**
+     * The console's listing rows, read from the membership the service returned rather than from an
+     * RDF rendering of it. The rendering is now built only when a client actually negotiates RDF
+     * (finding M23), and this page never did — it parsed a model back into the pair of fields the
+     * service had just been holding.
+     */
+    private static List<Item> children(List<ResourceRegistry.ChildRef> refs, LwsConfiguration cfg) {
         List<Item> out = new ArrayList<>();
-        Resource container = model.getResource(containerIri);
-        for (RDFNode node : model.listObjectsOfProperty(container, LWS.items).toList()) {
-            if (!node.isResource()) {
-                continue;
-            }
-            String childIri = node.asResource().getURI();
-            String childPath = Iris.toPath(cfg.baseUri(), childIri);
+        for (ResourceRegistry.ChildRef ref : refs) {
+            String childPath = Iris.toPath(cfg.baseUri(), ref.iri());
             if (childPath == null) {
                 continue;
             }
-            boolean isC = model.contains(node.asResource(), RDF.type, LWS.Container);
             String name = Iris.lastSegment(childPath) + (Iris.isContainerPath(childPath) ? "/" : "");
-            out.add(new Item(name, childPath, isC ? "container" : "resource"));
+            out.add(new Item(name, childPath, ref.container() ? "container" : "resource"));
         }
         out.sort((a, b) -> a.name().compareToIgnoreCase(b.name()));
         return out;

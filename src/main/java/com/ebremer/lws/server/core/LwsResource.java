@@ -17,7 +17,6 @@ import java.time.Instant;
  * @param size        byte size for non-RDF resources, otherwise -1
  * @param binaryKey   binary-store key for non-RDF resources, otherwise {@code null}
  * @param owner       owner WebID/controlled-identifier, or {@code null}
- * @param publicRead  whether the resource is world-readable
  * @param digest      hex SHA-256 of the content for non-RDF resources (RFC 9530 Repr-Digest), else {@code null}
  *
  * @author Erich Bremer
@@ -33,7 +32,6 @@ public record LwsResource(
         long size,
         String binaryKey,
         String owner,
-        boolean publicRead,
         String digest) {
 
     public boolean isContainer() {
@@ -51,11 +49,11 @@ public record LwsResource(
 
     public LwsResource withEtag(String newEtag) {
         return new LwsResource(iri, type, parentIri, created, modified, newEtag,
-                contentType, size, binaryKey, owner, publicRead, digest);
+                contentType, size, binaryKey, owner, digest);
     }
 
     public LwsResource withModified(Instant newModified) {
         return new LwsResource(iri, type, parentIri, created, newModified, etag,
-                contentType, size, binaryKey, owner, publicRead, digest);
+                contentType, size, binaryKey, owner, digest);
     }
 }

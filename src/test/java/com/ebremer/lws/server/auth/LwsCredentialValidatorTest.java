@@ -22,9 +22,12 @@ class LwsCredentialValidatorTest {
                 + "\",\"publicKeyJwk\":" + key.publicJwk().toJSONString() + "}]}";
         DocumentLoader loader = url -> sub.equals(url) ? cidDoc : null;
 
+        OutboundFetchPolicy permitAll = OutboundFetchPolicy.permitAll();
+        AudiencePolicy anyAudience = AudiencePolicy.permitAll();
         LwsCredentialValidator orchestrator = new LwsCredentialValidator(
-                new LwsOpenIdValidator(OutboundFetchPolicy.permitAll()),
-                new SsiCidValidator(loader), new DidKeyValidator(), null);
+                new LwsOpenIdValidator(permitAll, new HttpDocumentLoader(permitAll), anyAudience),
+                new SsiCidValidator(loader, anyAudience, 0),
+                new DidKeyValidator(anyAudience, 0), null);
 
         // did:key shape -> did:key suite
         String didToken = AuthTestSupport.signEdDSA(key, null, did, did, did, AuthTestSupport.future());

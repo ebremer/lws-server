@@ -19,7 +19,7 @@ public final class Pac4jSupport {
     }
 
     public static final String CLIENT_NAME = "OidcClient";
-    public static final String CALLBACK_PATH = "/callback";
+    public static final String CALLBACK_PATH = LwsConfiguration.CALLBACK_PATH;
     /** UI path that triggers the OIDC redirect; also where the callback returns to. */
     public static final String LOGIN_PATH = "/app/oidc-login";
 

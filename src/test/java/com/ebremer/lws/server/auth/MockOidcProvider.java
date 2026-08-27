@@ -57,6 +57,15 @@ public final class MockOidcProvider implements AutoCloseable {
                         + "@prefix lws: <https://www.w3.org/ns/lws#> .\n"
                         + "<" + issuer + "/profile-cid> did:service "
                         + "[ a lws:OpenIdProvider ; did:serviceEndpoint <" + issuer + "> ] ."));
+        // A document that names the provider, but for SOMEONE ELSE. Profile documents routinely
+        // describe other people, so the trust query has to follow the link from the subject
+        // rather than ask whether the graph mentions a provider anywhere.
+        server.createContext("/neighbour", e -> respond(e, "text/turtle",
+                "@prefix lws: <https://www.w3.org/ns/lws#> .\n"
+                        + "<" + issuer + "/neighbour> a lws:DataResource ; "
+                        + "<http://xmlns.com/foaf/0.1/knows> <" + issuer + "/profile> .\n"
+                        + "<" + issuer + "/profile> lws:service "
+                        + "[ a lws:OpenIdProvider ; lws:serviceEndpoint <" + issuer + "> ] ."));
         // Controlled identifier document that does NOT advertise the provider.
         server.createContext("/untrusted", e -> respond(e, "text/turtle",
                 "@prefix lws: <https://www.w3.org/ns/lws#> .\n<" + issuer + "/untrusted> a lws:DataResource ."));
@@ -84,17 +93,38 @@ public final class MockOidcProvider implements AutoCloseable {
         return issuer + "/untrusted";
     }
 
+    /** A subject whose document names the provider only for a neighbour it happens to describe. */
+    public String neighbourTrustedSubject() {
+        return issuer + "/neighbour";
+    }
+
+    /** The audience this provider mints tokens for by default (its registered relying party). */
+    public static final String DEFAULT_AUDIENCE = "lws-client";
+
+    /** This provider's genuine signing key, for tests that vary only the audience. */
+    public RSAKey signingKeyForTests() {
+        return signingKey;
+    }
+
     public String mintIdToken(String subject, Instant expiry) throws Exception {
         return mintIdToken(subject, expiry, signingKey);
     }
 
     public String mintIdToken(String subject, Instant expiry, RSAKey key) throws Exception {
+        return mintIdToken(subject, expiry, key, DEFAULT_AUDIENCE);
+    }
+
+    /** Mint an ID token for an explicit audience; a {@code null} audience omits {@code aud} entirely. */
+    public String mintIdToken(String subject, Instant expiry, RSAKey key, String audience) throws Exception {
         JWSHeader header = new JWSHeader.Builder(JWSAlgorithm.RS256)
                 .keyID(key.getKeyID()).type(JOSEObjectType.JWT).build();
-        JWTClaimsSet claims = new JWTClaimsSet.Builder()
-                .issuer(issuer).subject(subject).audience("lws-client")
-                .claim("azp", "lws-client").issueTime(new Date()).expirationTime(Date.from(expiry)).build();
-        SignedJWT jwt = new SignedJWT(header, claims);
+        JWTClaimsSet.Builder claims = new JWTClaimsSet.Builder()
+                .issuer(issuer).subject(subject)
+                .claim("azp", DEFAULT_AUDIENCE).issueTime(new Date()).expirationTime(Date.from(expiry));
+        if (audience != null) {
+            claims.audience(audience);
+        }
+        SignedJWT jwt = new SignedJWT(header, claims.build());
         jwt.sign(new RSASSASigner(key));
         return jwt.serialize();
     }

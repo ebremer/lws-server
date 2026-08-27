@@ -28,7 +28,12 @@ import com.ebremer.lws.server.core.LwsPrincipal;
  */
 class DidKeyValidatorTest {
 
-    private final DidKeyValidator validator = new DidKeyValidator();
+    private static final String STORAGE = "https://storage.example";
+
+    private final DidKeyValidator validator = new DidKeyValidator(AudiencePolicy.permitAll(), 0);
+    /** A storage that binds credentials to itself and caps self-minted token lifetimes at an hour. */
+    private final DidKeyValidator strict =
+            new DidKeyValidator(new AudiencePolicy(java.util.Set.of(STORAGE), true), 3_600_000L);
 
     @Test
     void acceptsValidEd25519Credential() throws Exception {
@@ -58,6 +63,29 @@ class DidKeyValidatorTest {
         assertTrue(validator.validate(
                 AuthTestSupport.signEdDSA(forger, null, did, did, did, AuthTestSupport.future()))
                 .isEmpty());
+    }
+
+    /**
+     * A did:key identity is self-minted with no registration anywhere, so the {@code aud} claim is
+     * the only thing that stops a token issued for one storage being replayed against another.
+     */
+    @Test
+    void rejectsCredentialAddressedToAnotherStorageOrLastingForever() throws Exception {
+        AuthTestSupport.Ed key = AuthTestSupport.ed25519();
+        String did = AuthTestSupport.didKeyEd25519(key.publicRaw());
+
+        assertTrue(strict.validate(AuthTestSupport.signEdDSA(
+                key, null, did, did, did, AuthTestSupport.future(), "https://other-storage.example"))
+                .isEmpty(), "aud naming another storage must be rejected");
+        assertTrue(strict.validate(AuthTestSupport.signEdDSA(
+                key, null, did, did, did, AuthTestSupport.future()))
+                .isEmpty(), "no aud at all must be rejected when one is required");
+        assertTrue(strict.validate(AuthTestSupport.signEdDSA(
+                key, null, did, did, did, AuthTestSupport.farFuture(), STORAGE))
+                .isEmpty(), "a 100-year lifetime must be rejected");
+        assertTrue(strict.validate(AuthTestSupport.signEdDSA(
+                key, null, did, did, did, AuthTestSupport.future(), STORAGE))
+                .isPresent(), "a credential addressed to this storage with a sane lifetime is accepted");
     }
 
     @Test

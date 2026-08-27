@@ -28,6 +28,9 @@ class StorageDescriptionServiceTest {
     void advertisesSparqlEndpointWhenEnabled() {
         Properties p = new Properties();
         p.setProperty("lws.base-uri", "http://storage.example");
+        // An owner, because this class asserts nothing about authorization and the
+        // development posture now has to be asked for explicitly.
+        p.setProperty("lws.owners", "https://owner.example/profile#me");
         p.setProperty("lws.sparql.endpoint.enabled", "true");
         p.setProperty("lws.sparql.endpoint.public-url", "https://storage.example/sparql");
         JsonObject doc = describe(p);
@@ -89,6 +92,9 @@ class StorageDescriptionServiceTest {
     }
 
     private static JsonObject describe(Properties p) {
+        // An owner, because this class asserts nothing about authorization and the development
+        // posture now has to be asked for explicitly.
+        p.putIfAbsent("lws.owners", "https://owner.example/profile#me");
         return Json.createReader(new StringReader(
                 new StorageDescriptionService(LwsConfiguration.of(p)).buildJson())).readObject();
     }

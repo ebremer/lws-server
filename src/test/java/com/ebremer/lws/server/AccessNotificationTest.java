@@ -11,6 +11,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.Base64;
 import java.util.Properties;
@@ -32,6 +33,13 @@ import com.ebremer.lws.server.tools.DidKeyTool;
  * @author Erich Bremer
  */
 class AccessNotificationTest {
+
+    /**
+     * This class's data directory. Deleted on the way out where the platform allows it, and by the
+     * next run's sweep where it does not — see {@link TestDirs}. It used to be a bare
+     * {@code createTempDirectory} that nothing ever removed, and the leak once filled a disk.
+     */
+    private static final Path tempDir = TestDirs.create();
 
     private record Received(String contentType, String contentDigest, String signatureInput,
             String signature, byte[] body) {
@@ -68,20 +76,23 @@ class AccessNotificationTest {
         });
         inbox.start();
 
-        DidKeyTool.Minted owner = DidKeyTool.mint(null, 3600, null);
-        DidKeyTool.Minted bob = DidKeyTool.mint(null, 3600, null);
+        int port = freePort();
+        baseUrl = "http://localhost:" + port;
+
+        // Minted for this storage: credentials carry an `aud` naming it (see AudiencePolicy).
+        DidKeyTool.Minted owner = DidKeyTool.mint(null, 3600, baseUrl);
+        DidKeyTool.Minted bob = DidKeyTool.mint(null, 3600, baseUrl);
         ownerToken = owner.token();
         bobToken = bob.token();
         bobDid = bob.did();
 
-        int port = freePort();
-        baseUrl = "http://localhost:" + port;
         Properties p = new Properties();
         p.setProperty("lws.base-uri", baseUrl);
-        p.setProperty("lws.data-dir", Files.createTempDirectory("lws-access-notify").toString());
+        p.setProperty("lws.data-dir", tempDir.toString());
         p.setProperty("lws.owners", owner.did());
         p.setProperty("lws.access-requests.controller-inbox", inboxUrl);
         p.setProperty("lws.webhook.max-attempts", "1");
+        p.setProperty("lws.webhook.allowed-hosts", "localhost"); // the test inbox is on loopback
         LwsConfiguration config = LwsConfiguration.of(p);
         components = LwsComponents.create(config);
         lws = new Server(port);

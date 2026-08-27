@@ -54,6 +54,16 @@ public class LwsException extends RuntimeException {
         return new LwsException(401, message);
     }
 
+    /** A conditional write whose {@code If-Match} did not match the stored entity-tag. */
+    public static LwsException preconditionFailed(String message) {
+        return new LwsException(412, message);
+    }
+
+    /** A write that must have been conditional and was not (lws10-core update-resource). */
+    public static LwsException preconditionRequired(String message) {
+        return new LwsException(428, message);
+    }
+
     public static LwsException unavailableForLegalReasons(String message) {
         return new LwsException(451, message);
     }

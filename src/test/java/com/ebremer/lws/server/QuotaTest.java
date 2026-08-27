@@ -7,6 +7,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Properties;
 import org.eclipse.jetty.server.Server;
 import org.junit.jupiter.api.AfterAll;
@@ -22,6 +23,13 @@ import org.junit.jupiter.api.Test;
  */
 class QuotaTest {
 
+    /**
+     * This class's data directory. Deleted on the way out where the platform allows it, and by the
+     * next run's sweep where it does not — see {@link TestDirs}. It used to be a bare
+     * {@code createTempDirectory} that nothing ever removed, and the leak once filled a disk.
+     */
+    private static final Path tempDir = TestDirs.create();
+
     private static Server server;
     private static LwsComponents components;
     private static String baseUrl;
@@ -33,7 +41,10 @@ class QuotaTest {
         baseUrl = "http://localhost:" + port;
         Properties p = new Properties();
         p.setProperty("lws.base-uri", baseUrl);
-        p.setProperty("lws.data-dir", Files.createTempDirectory("lws-quota").toString());
+        // Open mode: this class asserts protocol behaviour, not authorization outcomes,
+        // so it opts in to the development posture rather than configuring an owner.
+        p.setProperty("lws.dev.open", "true");
+        p.setProperty("lws.data-dir", tempDir.toString());
         p.setProperty("lws.quota.max-bytes", "10");
         LwsConfiguration config = LwsConfiguration.of(p);
         components = LwsComponents.create(config);

@@ -1,0 +1,61 @@
+name: build
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  # A dependency that was fine on Friday can be withdrawn or found vulnerable by Monday, and
+  # nothing in this repo would notice until someone happened to push.
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          # maven.compiler.release=25; the build emits class-file major 69 and will not run on less.
+          java-version: '25'
+          distribution: temurin
+          cache: maven
+
+      - name: Verify
+        # -B batch mode, -ntp no transfer progress: readable logs.
+        # This runs the enforcer (dependency convergence and upper bounds) as well as the tests.
+        run: mvn -B -ntp verify
+
+      - name: Software bill of materials
+        run: mvn -B -ntp -Psbom package -DskipTests
+
+      - name: Publish SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: target/lws-server-sbom.*
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Publish test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: target/surefire-reports/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The suite leaks a TDB2 directory per run into the temp dir and has filled a disk before now
+  # (see TODO.md P3). On a fresh runner that cannot bite, but a second run in the same job would
+  # start from a dirty temp dir, so the build above is deliberately the only thing that runs tests.

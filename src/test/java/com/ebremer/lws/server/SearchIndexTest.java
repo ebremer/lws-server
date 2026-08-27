@@ -13,6 +13,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.Properties;
 import java.util.Set;
@@ -29,7 +30,10 @@ import org.apache.jena.riot.RDFDataMgr;
 import org.eclipse.jetty.server.Server;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
 
 /**
  * HTTP integration tests for the Type Index and Type Search services (lws10-searchindex), driving a
@@ -38,7 +42,15 @@ import org.junit.jupiter.api.Test;
  *
  * @author Erich Bremer
  */
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SearchIndexTest {
+
+    /**
+     * This class's data directory. Deleted on the way out where the platform allows it, and by the
+     * next run's sweep where it does not — see {@link TestDirs}. It used to be a bare
+     * {@code createTempDirectory} that nothing ever removed, and the leak once filled a disk.
+     */
+    private static final Path tempDir = TestDirs.create();
 
     private static final String SCHEMA_PERSON = "https://schema.org/Person";
     private static final String FOAF_PERSON = "http://xmlns.com/foaf/0.1/Person";
@@ -62,7 +74,10 @@ class SearchIndexTest {
         baseUrl = "http://localhost:" + port;
         Properties p = new Properties();
         p.setProperty("lws.base-uri", baseUrl);
-        p.setProperty("lws.data-dir", Files.createTempDirectory("lws-search").toString());
+        // Open mode: this class asserts protocol behaviour, not authorization outcomes,
+        // so it opts in to the development posture rather than configuring an owner.
+        p.setProperty("lws.dev.open", "true");
+        p.setProperty("lws.data-dir", tempDir.toString());
         LwsConfiguration config = LwsConfiguration.of(p);
         components = LwsComponents.create(config);
         server = new Server(port);
@@ -114,6 +129,7 @@ class SearchIndexTest {
     }
 
     @Test
+    @Order(1)
     void typeIndexListsDistinctVisibleTypes() {
         JsonObject doc = getLws(baseUrl + INDEX);
         assertEquals("TypeIndex", doc.getString("type"));
@@ -122,15 +138,27 @@ class SearchIndexTest {
         assertEquals(types.size(), doc.getInt("totalItems"));
     }
 
+    /**
+     * Adds a type to a shared index and takes it away again, so the cleanup runs in a
+     * {@code finally}: {@link #typeIndexListsDistinctVisibleTypes} asserts the <em>exact</em> set of
+     * visible types, and an assertion failing here used to leave {@code Ephemeral} behind and fail
+     * that one too — a second, misleading red for a defect in neither (finding M46). The class also
+     * no longer depends on JUnit's unspecified default method order to run the two in a workable
+     * sequence; see the {@code @TestMethodOrder} on the class.
+     */
     @Test
+    @Order(2)
     void derivedIndexReflectsCreateAndDelete() throws Exception {
         String type = "https://ex.org/Ephemeral";
-        // A resource created while the derived index is in use must become searchable...
-        put("/ephemeral", "<> a <" + type + "> .");
-        assertTrue(ids(getLws(baseUrl + SEARCH + "?type=" + enc(type))).contains(baseUrl + "/ephemeral"),
-                "a newly created resource must be searchable");
-        // ...and deleting it must remove it from the index (incremental maintenance).
-        delete("/ephemeral");
+        try {
+            // A resource created while the derived index is in use must become searchable...
+            put("/ephemeral", "<> a <" + type + "> .");
+            assertTrue(ids(getLws(baseUrl + SEARCH + "?type=" + enc(type))).contains(baseUrl + "/ephemeral"),
+                    "a newly created resource must be searchable");
+        } finally {
+            // ...and deleting it must remove it from the index (incremental maintenance).
+            delete("/ephemeral");
+        }
         assertEquals(0, getLws(baseUrl + SEARCH + "?type=" + enc(type)).getInt("totalItems"),
                 "a deleted resource must leave the index");
     }
@@ -196,6 +224,88 @@ class SearchIndexTest {
         assertTrue(ids(doc).isEmpty());
     }
 
+    /**
+     * {@code Link: rel="type"} on a write declares the resource's type, and the type index finds it
+     * (lws10-searchindex makes this the preferred type source).
+     *
+     * <p>Pre-fix, {@code HttpSupport.parseLinks} dropped every {@code rel="type"} and
+     * {@code LinksetService} refused the {@code type} relation outright, so a client had no way to
+     * declare a type at all — and a <em>binary</em> resource, which has no content graph to assert
+     * one in, had no way to carry one by any route. Both assertions below fail against it.
+     */
+    @Test
+    @Order(30)
+    void aDeclaredTypeIsIndexedAndSearchable() throws Exception {
+        String declared = "https://schema.org/Photograph";
+        HttpResponse<String> created = http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/photo.bin"))
+                .header("Content-Type", "application/octet-stream")
+                .header("Link", "<" + declared + ">; rel=\"type\"")
+                .PUT(HttpRequest.BodyPublishers.ofString("bytes")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(201, created.statusCode());
+
+        // It reaches the resource's own metadata, alongside the structural type the server assigns.
+        JsonObject linkset = Json.createReader(new StringReader(
+                getRaw(baseUrl + "/photo.bin.meta").body())).readObject()
+                .getJsonArray("linkset").getJsonObject(0);
+        Set<String> types = new HashSet<>();
+        linkset.getJsonArray("type").forEach(v -> types.add(v.asJsonObject().getString("href")));
+        assertTrue(types.contains(declared), "the declared type is kept: " + types);
+        assertTrue(types.contains(LWS_DATA), "the server's structural type is still there: " + types);
+
+        // And a type search finds it.
+        assertTrue(ids(getLws(baseUrl + SEARCH + "?type=" + enc(declared))).contains(baseUrl + "/photo.bin"),
+                "a declared type must be searchable");
+    }
+
+    /**
+     * A client may describe its resource and may not impersonate one. Anything in the LWS namespace
+     * is refused, as are the LDP interaction models — those say what the resource is <em>to this
+     * server</em>, and the server is the only party entitled to say it.
+     */
+    @Test
+    @Order(31)
+    void aClientCannotDeclareAServerManagedType() throws Exception {
+        HttpResponse<String> created = http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/spoof.bin"))
+                .header("Content-Type", "application/octet-stream")
+                .header("Link", "<https://www.w3.org/ns/lws#Storage>; rel=\"type\"")
+                .header("Link", "<https://www.w3.org/ns/lws#AccessGrant>; rel=\"type\"")
+                .header("Link", "<http://www.w3.org/ns/ldp#Resource>; rel=\"type\"")
+                .PUT(HttpRequest.BodyPublishers.ofString("bytes")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(201, created.statusCode());
+
+        JsonObject linkset = Json.createReader(new StringReader(
+                getRaw(baseUrl + "/spoof.bin.meta").body())).readObject()
+                .getJsonArray("linkset").getJsonObject(0);
+        Set<String> types = new HashSet<>();
+        linkset.getJsonArray("type").forEach(v -> types.add(v.asJsonObject().getString("href")));
+        assertEquals(Set.of(LWS_DATA), types,
+                "only the server's own structural type survives: " + types);
+
+        // The whole LWS namespace is refused, not a hand-listed few — which is why the search for a
+        // term the denylist would have had to enumerate finds nothing.
+        assertEquals(0, getLws(baseUrl + SEARCH + "?type="
+                + enc("https://www.w3.org/ns/lws#Storage")).getInt("totalItems"));
+    }
+
+    /**
+     * The interaction models keep their existing meaning: {@code Link: rel="type"} naming one is the
+     * client saying what kind of resource to <em>create</em>, and a container hint on a slash-less
+     * name is still the contradiction M13 refuses. Opening {@code rel="type"} as a type source must
+     * not have quietly turned that into an ordinary declared type.
+     */
+    @Test
+    @Order(32)
+    void theInteractionModelIsStillAnInteractionModel() throws Exception {
+        HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/notacontainer"))
+                .header("Content-Type", "application/octet-stream")
+                .header("Link", "<" + LWS_CONTAINER + ">; rel=\"type\"")
+                .PUT(HttpRequest.BodyPublishers.ofString("bytes")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, r.statusCode(), "a container IRI must end in '/' (finding M13)");
+    }
+
     @Test
     void postWrongMediaTypeIsRejected() throws Exception {
         HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(baseUrl + SEARCH))
@@ -251,6 +361,12 @@ class SearchIndexTest {
         HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(baseUrl + path))
                 .DELETE().build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(204, r.statusCode(), "DELETE " + path + " -> " + r.statusCode() + " " + r.body());
+    }
+
+    /** A plain GET, whatever the media type; used to read a linkset document. */
+    private static HttpResponse<String> getRaw(String url) throws Exception {
+        return http.send(HttpRequest.newBuilder(URI.create(url)).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
     }
 
     private static JsonObject getLws(String url) {

@@ -33,6 +33,14 @@ public final class FusekiSparqlServer implements AutoCloseable {
         this.server = FusekiServer.create()
                 .port(config.sparqlEndpointPort())
                 .loopback(config.sparqlEndpointLoopback())
+                // Stated rather than left to the builder's default. Fuseki's own CORS defaults are
+                // Access-Control-Allow-Origin: * with every method and an allow-listed
+                // Authorization header; on an endpoint that bypasses WAC and exposes the internal
+                // admin, ACL and grant graphs, and that is normally loopback-only, that would make
+                // any page a developer visits able to read the whole storage from their machine.
+                // It is off by default today, so this is a pin against a Jena default changing —
+                // and it is deliberately NOT wired to lws.cors.*, which governs the LWS API.
+                .enableCors(false)
                 .add(config.sparqlEndpointDataset(), dataset.asDatasetGraph(), !config.sparqlEndpointReadOnly())
                 .build();
     }

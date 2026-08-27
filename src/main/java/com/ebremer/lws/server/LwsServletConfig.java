@@ -14,13 +14,17 @@ import org.springframework.boot.web.servlet.ServletRegistrationBean;
 import org.springframework.boot.web.servlet.server.ConfigurableServletWebServerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.ebremer.lws.server.auth.Pac4jSupport;
 import com.ebremer.lws.server.http.AccessServlet;
+import com.ebremer.lws.server.http.CorsFilter;
 import com.ebremer.lws.server.http.JwksServlet;
 import com.ebremer.lws.server.http.LwsResourceServlet;
 import com.ebremer.lws.server.http.SearchIndexServlet;
 import com.ebremer.lws.server.http.StorageDescriptionServlet;
 import com.ebremer.lws.server.http.SubscriptionServlet;
+import com.ebremer.lws.server.tls.HstsFilter;
 import com.ebremer.lws.server.ui.LwsWebApplication;
 
 /**
@@ -37,9 +41,31 @@ import com.ebremer.lws.server.ui.LwsWebApplication;
 @Configuration
 public class LwsServletConfig {
 
+    private static final Logger log = LoggerFactory.getLogger(LwsServletConfig.class);
+
     @Bean(destroyMethod = "close")
     public LwsComponents lwsComponents() {
-        return LwsComponents.create(LwsConfiguration.load());
+        LwsConfiguration config = LwsConfiguration.load();
+        warnIfTlsIsConfiguredButUnused(config);
+        return LwsComponents.create(config);
+    }
+
+    /**
+     * This entry point does not terminate TLS, and it is the one the README calls the default.
+     *
+     * <p>{@code lws.tls.*} — the self-terminated HTTPS connector, the ACME certificate manager and
+     * the HTTP-to-HTTPS redirect — are read and acted on only by {@link JettyLauncher}. Under Spring
+     * Boot they were silently ignored: an operator who set {@code lws.tls.enabled=true}, restarted,
+     * and saw the server come up had every reason to believe it was serving HTTPS, and it was
+     * serving plaintext on the HTTP port (finding L58). Nothing said otherwise. Now something does.
+     */
+    private static void warnIfTlsIsConfiguredButUnused(LwsConfiguration config) {
+        if (config.tlsEnabled()) {
+            log.warn("lws.tls.enabled=true is IGNORED by this entry point: the Spring Boot bootstrap "
+                    + "serves plaintext HTTP on port {} and terminates no TLS. Run the JettyLauncher "
+                    + "main (com.ebremer.lws.server.JettyLauncher) for built-in TLS, or terminate "
+                    + "TLS at a reverse proxy and set lws.behind-proxy=true.", config.port());
+        }
     }
 
     @Bean
@@ -117,6 +143,56 @@ public class LwsServletConfig {
                 c.config().accessGrantsPath(), c.config().accessGrantsPath() + "/*");
         bean.setName("lwsAccess");
         bean.setEnabled(c.config().accessRequestsEnabled());
+        return bean;
+    }
+
+    /**
+     * {@code Strict-Transport-Security} on responses served over TLS.
+     *
+     * <p>This entry point terminates no TLS, which is precisely why the filter belongs here: the
+     * documented production posture is a reverse proxy in front of it, so {@code isSecure()} is true
+     * (via {@code ForwardedRequestCustomizer}, wired above when {@code lws.behind-proxy=true}) and
+     * these responses are the ones a browser sees over HTTPS. Before this, HSTS existed only on the
+     * bare-Jetty launcher's plaintext redirect, where RFC 6797 requires user agents to ignore it —
+     * so the default deployment emitted none at all (finding M28).
+     */
+    @Bean
+    public FilterRegistrationBean<Filter> hstsFilter(LwsComponents c) {
+        FilterRegistrationBean<Filter> bean = new FilterRegistrationBean<>();
+        HstsFilter filter = HstsFilter.forConfig(c.config());
+        if (filter == null) {
+            bean.setFilter((req, res, chain) -> chain.doFilter(req, res));
+            bean.setEnabled(false);
+            return bean;
+        }
+        bean.setFilter(filter);
+        bean.addUrlPatterns("/*");
+        bean.setOrder(0); // before authentication, so the header is set whatever the outcome
+        bean.setName("lwsHsts");
+        return bean;
+    }
+
+    /**
+     * Cross-origin access for browser applications (finding M7).
+     *
+     * <p>Ordered ahead of {@link #authenticationFilter}: a CORS preflight carries no credentials by
+     * definition, so if it reached the resource servlet it would be answered {@code 401} or
+     * {@code 404} and the browser would block the real request behind it. Not registered at all
+     * unless {@code lws.cors.allowed-origins} names something.
+     */
+    @Bean
+    public FilterRegistrationBean<Filter> corsFilter(LwsComponents c) {
+        FilterRegistrationBean<Filter> bean = new FilterRegistrationBean<>();
+        CorsFilter filter = CorsFilter.forConfig(c.config());
+        if (filter == null) {
+            bean.setFilter((req, res, chain) -> chain.doFilter(req, res));
+            bean.setEnabled(false);
+            return bean;
+        }
+        bean.setFilter(filter);
+        bean.addUrlPatterns("/*");
+        bean.setOrder(0);
+        bean.setName("lwsCors");
         return bean;
     }
 

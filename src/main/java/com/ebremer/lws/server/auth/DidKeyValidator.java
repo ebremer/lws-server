@@ -10,7 +10,7 @@ import com.ebremer.lws.server.core.LwsPrincipal;
 
 /**
  * Validates an LWS did:key authentication credential, per
- * <a href="https://w3c.github.io/lws-protocol/lws10-authn-ssi-ssi-did-key/">LWS Authentication:
+ * <a href="https://w3c.github.io/lws-protocol/lws10-authn-ssi-did-key/">LWS Authentication:
  * Self-signed did:key</a>. The credential is a signed JWT whose {@code sub}, {@code iss} and
  * {@code client_id} are all the same {@code did:key:} URI; the verification key is extracted
  * directly from that identifier, so no network lookup is required.
@@ -20,6 +20,19 @@ import com.ebremer.lws.server.core.LwsPrincipal;
 public final class DidKeyValidator implements CredentialValidator {
 
     private static final Logger log = LoggerFactory.getLogger(DidKeyValidator.class);
+
+    private final AudiencePolicy audience;
+    private final long maxLifetimeMs;
+
+    /**
+     * @param audience      audience policy; a did:key credential is self-minted, so without one a
+     *                      token addressed to another storage would authenticate here
+     * @param maxLifetimeMs maximum accepted token lifetime, or {@code <= 0} for unlimited
+     */
+    public DidKeyValidator(AudiencePolicy audience, long maxLifetimeMs) {
+        this.audience = audience;
+        this.maxLifetimeMs = maxLifetimeMs;
+    }
 
     @Override
     public Optional<LwsPrincipal> validate(String credential) {
@@ -39,13 +52,17 @@ public final class DidKeyValidator implements CredentialValidator {
                 log.debug("did:key credential: sub/iss/client_id must be identical");
                 return Optional.empty();
             }
+            if (!audience.permits(claims)) {
+                log.debug("did:key credential: aud does not name this storage");
+                return Optional.empty();
+            }
             JWK jwk = DidKey.toPublicJwk(sub);
             if (!JwsSupport.verify(jwt, jwk)) {
                 log.debug("did:key credential: signature does not verify");
                 return Optional.empty();
             }
-            if (!JwsSupport.notExpired(claims)) {
-                log.debug("did:key credential: expired or missing exp");
+            if (!JwsSupport.temporalClaimsValid(claims, maxLifetimeMs)) {
+                log.debug("did:key credential: missing/expired exp, post-dated, or lifetime too long");
                 return Optional.empty();
             }
             return Optional.of(new LwsPrincipal(sub, iss, clientId));

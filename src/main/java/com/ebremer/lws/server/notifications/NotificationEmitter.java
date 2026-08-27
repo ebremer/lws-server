@@ -2,8 +2,11 @@ package com.ebremer.lws.server.notifications;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.function.Supplier;
 import jakarta.json.Json;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonObject;
@@ -11,8 +14,9 @@ import jakarta.json.JsonObjectBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.ebremer.lws.server.LwsConfiguration;
-import com.ebremer.lws.server.core.Iris;
+import com.ebremer.lws.server.core.ActivityKind;
 import com.ebremer.lws.server.core.LwsPrincipal;
+import com.ebremer.lws.server.core.RequestContext;
 import com.ebremer.lws.server.core.ResourceEvent;
 import com.ebremer.lws.server.core.ResourceEventListener;
 import com.ebremer.lws.server.core.ResourceService;
@@ -53,9 +57,7 @@ public final class NotificationEmitter implements ResourceEventListener {
         }
         byte[] body = null;
         for (Subscription subscription : matches) {
-            LwsPrincipal subscriber = subscription.subscriberWebId() == null
-                    ? null : new LwsPrincipal(subscription.subscriberWebId(), null, null);
-            if (!authorizedToReceive(subscriber, event)) {
+            if (!authorizedToReceive(subscription, event)) {
                 log.debug("Suppressing notification of {} to {} (not authorized to read)",
                         event.iri(), subscription.id());
                 continue;
@@ -67,13 +69,68 @@ public final class NotificationEmitter implements ResourceEventListener {
         }
     }
 
-    private boolean authorizedToReceive(LwsPrincipal subscriber, ResourceEvent event) {
-        // The resource no longer exists for a delete, so fall back to its parent container.
-        if (event.kind() == com.ebremer.lws.server.core.ActivityKind.DELETE) {
-            String parent = parentIriOf(event.iri());
-            return parent == null || resources.canRead(subscriber, parent);
+    /**
+     * The ids of subscriptions covering {@code iri} whose subscriber may read it <em>now</em>.
+     *
+     * <p>Called by {@code ResourceService} before a delete transaction opens, because afterwards the
+     * resource's own ACL is gone and the question can no longer be answered honestly. See
+     * {@link com.ebremer.lws.server.core.DeleteAudience}.
+     */
+    public Set<String> subscribersAllowedToKnow(String iri) {
+        return asSubscriber(() -> {
+            Set<String> allowed = new LinkedHashSet<>();
+            for (Subscription subscription : subscriptions.activeMatching(iri)) {
+                if (resources.canRead(subscriberOf(subscription), iri)) {
+                    allowed.add(subscription.id());
+                }
+            }
+            return allowed;
+        });
+    }
+
+    private boolean authorizedToReceive(Subscription subscription, ResourceEvent event) {
+        if (event.kind() == ActivityKind.DELETE) {
+            // Decided before the resource was removed and carried here on the event. There is
+            // nothing left to evaluate now: the resource is gone and its ACL with it, so asking
+            // again would resolve through container inheritance and tell every reader of the parent
+            // that a private child existed, its IRI, who deleted it and when (finding H19). No
+            // captured audience means nobody — the direction the old parent fallback got backwards,
+            // where a null parent path meant "deliver to everyone".
+            return event.audience() != null && event.audience().contains(subscription.id());
         }
-        return resources.canRead(subscriber, event.iri());
+        return asSubscriber(() -> resources.canRead(subscriberOf(subscription), event.iri()));
+    }
+
+    private static LwsPrincipal subscriberOf(Subscription subscription) {
+        return subscription.subscriberWebId() == null
+                ? null : new LwsPrincipal(subscription.subscriberWebId(), null, null);
+    }
+
+    /**
+     * Evaluate a subscriber's access with no request context at all.
+     *
+     * <p>Listeners run synchronously on the <em>writer's</em> thread, and {@link RequestContext} is a
+     * thread-local holding the writer's {@code Origin} and {@code LWS-Purpose}. So a subscriber's
+     * read decision was partly made from the headers of whoever happened to trigger the change:
+     * a write from an allow-listed app delivered notifications to subscribers an
+     * {@code acl:origin} rule was written to exclude, and the same write from anywhere else
+     * withheld them (finding M31). Neither answer had anything to do with the subscriber.
+     *
+     * <p>Cleared rather than substituted, because a webhook delivery genuinely has no origin and
+     * declares no purpose: an origin-restricted authorization should not apply to it, and
+     * {@code originAllowed} refuses when no {@code Origin} is present — the fail-closed direction.
+     * The writer's context is restored afterwards; it still belongs to the request in progress.
+     */
+    private <T> T asSubscriber(Supplier<T> decision) {
+        String origin = RequestContext.origin();
+        Set<String> purposes = RequestContext.purposes();
+        RequestContext.clear();
+        try {
+            return decision.get();
+        } finally {
+            RequestContext.setOrigin(origin);
+            RequestContext.setPurposes(purposes);
+        }
     }
 
     /**
@@ -127,15 +184,6 @@ public final class NotificationEmitter implements ResourceEventListener {
                 .add("activity", Json.createArrayBuilder().add(activity).build())
                 .build();
         return notification.toString().getBytes(StandardCharsets.UTF_8);
-    }
-
-    private String parentIriOf(String iri) {
-        String path = Iris.toPath(config.baseUri(), iri);
-        if (path == null) {
-            return null;
-        }
-        String parent = Iris.parentPath(path);
-        return parent == null ? null : Iris.toIri(config.baseUri(), parent);
     }
 
     private static String capitalize(String s) {

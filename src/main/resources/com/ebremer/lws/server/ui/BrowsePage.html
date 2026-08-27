@@ -17,7 +17,7 @@
             <li wicket:id="items">
                 <a wicket:id="link"><span wicket:id="name">name</span></a>
                 <span class="kind" wicket:id="kind">kind</span>
-                <a class="del" wicket:id="del">delete</a>
+                <form wicket:id="del" class="inlineform"><button type="submit" class="del">delete</button></form>
             </li>
         </ul>
         <p wicket:id="empty" class="muted">(empty container)</p>
@@ -42,7 +42,7 @@
             <textarea wicket:id="turtle" rows="12"></textarea>
             <p><button type="submit">Save</button></p>
         </form>
-        <p><a class="del" wicket:id="deleteRdf">Delete this resource</a></p>
+        <form wicket:id="deleteRdf"><button type="submit" class="del">Delete this resource</button></form>
     </div>
 
     <!-- Non-RDF resource -->
@@ -53,7 +53,7 @@
         <form wicket:id="replaceForm">
             <p>Replace with file: <input type="file" wicket:id="replaceFile"/> <button type="submit">Replace</button></p>
         </form>
-        <p><a class="del" wicket:id="deleteBin">Delete this resource</a></p>
+        <form wicket:id="deleteBin"><button type="submit" class="del">Delete this resource</button></form>
     </div>
 
     <!-- ACL editor (WAC + Control) -->
@@ -63,7 +63,7 @@
             <textarea wicket:id="aclArea" rows="12"></textarea>
             <p><button type="submit">Save ACL</button></p>
         </form>
-        <p><a class="del" wicket:id="deleteAcl">Remove ACL</a></p>
+        <form wicket:id="deleteAcl"><button type="submit" class="del">Remove ACL</button></form>
     </div>
 </wicket:extend>
 </body>

@@ -9,6 +9,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Properties;
 import org.eclipse.jetty.server.Server;
 import org.junit.jupiter.api.AfterAll;
@@ -25,6 +26,13 @@ import com.ebremer.lws.server.auth.MockOidcProvider;
  */
 class OidcSsoRedirectTest {
 
+    /**
+     * This class's data directory. Deleted on the way out where the platform allows it, and by the
+     * next run's sweep where it does not — see {@link TestDirs}. It used to be a bare
+     * {@code createTempDirectory} that nothing ever removed, and the leak once filled a disk.
+     */
+    private static final Path tempDir = TestDirs.create();
+
     private static MockOidcProvider idp;
     private static Server lws;
     private static LwsComponents components;
@@ -38,7 +46,10 @@ class OidcSsoRedirectTest {
         baseUrl = "http://localhost:" + port;
         Properties p = new Properties();
         p.setProperty("lws.base-uri", baseUrl);
-        p.setProperty("lws.data-dir", Files.createTempDirectory("lws-oidc-sso").toString());
+        // An owner, because this class asserts nothing about authorization and the
+        // development posture now has to be asked for explicitly.
+        p.setProperty("lws.owners", "https://owner.example/profile#me");
+        p.setProperty("lws.data-dir", tempDir.toString());
         p.setProperty("lws.oidc.discovery-uri", idp.discoveryUri());
         p.setProperty("lws.oidc.client-id", "lws-client");
         p.setProperty("lws.oidc.client-secret", "test-secret");

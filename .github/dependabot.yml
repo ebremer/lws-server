@@ -1,0 +1,39 @@
+version: 2
+
+updates:
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels: ['dependencies']
+    # The POM manages several artifacts purely to keep the resolved graph converging
+    # (Bouncy Castle, commons-lang3, commons-codec, asm, commons-io, error_prone_annotations).
+    # Grouping them means one PR to review and one enforcer run to satisfy, rather than a series
+    # of PRs that each fail dependencyConvergence until the last one lands.
+    groups:
+      convergence-pins:
+        patterns:
+          - 'org.bouncycastle:*'
+          - 'org.apache.commons:commons-lang3'
+          - 'commons-codec:commons-codec'
+          - 'commons-io:commons-io'
+          - 'org.ow2.asm:*'
+          - 'com.google.errorprone:error_prone_annotations'
+      jena:
+        patterns:
+          - 'org.apache.jena:*'
+      pac4j:
+        patterns:
+          - 'org.pac4j:*'
+      spring-boot:
+        patterns:
+          - 'org.springframework.boot:*'
+          - 'org.springframework:*'
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: ['dependencies']

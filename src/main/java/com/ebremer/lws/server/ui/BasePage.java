@@ -3,7 +3,7 @@ package com.ebremer.lws.server.ui;
 import org.apache.wicket.markup.html.WebPage;
 import org.apache.wicket.markup.html.basic.Label;
 import org.apache.wicket.markup.html.link.BookmarkablePageLink;
-import org.apache.wicket.markup.html.link.Link;
+import org.apache.wicket.markup.html.form.Form;
 import org.apache.wicket.markup.html.panel.FeedbackPanel;
 import org.apache.wicket.request.mapper.parameter.PageParameters;
 import com.ebremer.lws.server.core.LwsPrincipal;
@@ -29,9 +29,11 @@ public abstract class BasePage extends WebPage {
         add(new BookmarkablePageLink<Void>("home", BrowsePage.class));
         add(new Label("principal", session.isSignedIn() ? session.getPrincipal().webId() : "anonymous"));
         add(new BookmarkablePageLink<Void>("signin", LoginPage.class).setVisible(!session.isSignedIn()));
-        Link<Void> signout = new Link<>("signout") {
+        // A POST, not a link: a GET sign-out is triggerable cross-site (and by link prefetchers
+        // and mail/chat scanners) simply by pointing the victim's browser at the URL.
+        Form<Void> signout = new Form<>("signout") {
             @Override
-            public void onClick() {
+            protected void onSubmit() {
                 LwsSession.get().signOut();
                 getSession().info("Signed out.");
                 setResponsePage(BrowsePage.class);

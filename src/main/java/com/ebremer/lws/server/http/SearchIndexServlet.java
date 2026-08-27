@@ -21,6 +21,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.ebremer.lws.server.LwsConfiguration;
 import com.ebremer.lws.server.auth.AuthenticationFilter;
+import com.ebremer.lws.server.core.JsonLimits;
 import com.ebremer.lws.server.core.LwsException;
 import com.ebremer.lws.server.core.LwsPrincipal;
 import com.ebremer.lws.server.core.SearchIndexService;
@@ -160,14 +161,17 @@ public final class SearchIndexServlet extends HttpServlet {
             throw LwsException.unsupportedMediaType("POST body must be " + HttpSupport.LWS_JSON);
         }
         JsonObject body;
-        try (var reader = Json.createReader(req.getInputStream())) {
+        // Bounded before parsing: this endpoint has no authorization gate in front of it at all.
+        byte[] raw = HttpSupport.readBody(req, config.maxRequestBytes());
+        JsonLimits.requireBoundedNesting(raw);
+        try (var reader = Json.createReader(new java.io.ByteArrayInputStream(raw))) {
             JsonStructure parsed = reader.read();
             if (!(parsed instanceof JsonObject object)) {
                 throw LwsException.badRequest("Request body must be a JSON object");
             }
             body = object;
-        } catch (JsonException | IllegalStateException e) {
-            throw LwsException.badRequest("Invalid JSON: " + e.getMessage());
+        } catch (JsonException | IllegalStateException | StackOverflowError e) {
+            throw LwsException.badRequest("Invalid JSON: " + e);
         }
         List<Clause> clauses = new ArrayList<>();
         int values = 0;

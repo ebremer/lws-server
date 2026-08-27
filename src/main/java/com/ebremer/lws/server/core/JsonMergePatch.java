@@ -4,6 +4,7 @@ import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import jakarta.json.Json;
+import jakarta.json.JsonException;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonObjectBuilder;
 import jakarta.json.JsonReader;
@@ -15,6 +16,9 @@ import jakarta.json.JsonValue;
  * <p>The algorithm: if the patch is a JSON object, recursively merge it into the target (a member
  * whose value is {@code null} is removed; an object value is merged; any other value replaces);
  * if the patch is not an object, it replaces the target entirely.
+ *
+ * <p>{@link #apply} recurses to the depth of the patch, and is safe to do so because {@link #read}
+ * refuses a document nested past {@link JsonLimits#MAX_NESTING_DEPTH} before any of it is parsed.
  *
  * @author Erich Bremer
  */
@@ -56,8 +60,11 @@ public final class JsonMergePatch {
     }
 
     public static JsonValue read(byte[] json) {
+        JsonLimits.requireBoundedNesting(json);
         try (JsonReader reader = Json.createReader(new ByteArrayInputStream(json))) {
             return reader.readValue();
+        } catch (JsonException | IllegalStateException | StackOverflowError e) {
+            throw LwsException.badRequest("Invalid JSON: " + e);
         }
     }
 }

@@ -2,16 +2,20 @@ package com.ebremer.lws.server.core;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import jakarta.json.Json;
+import jakarta.json.JsonArray;
 import jakarta.json.JsonArrayBuilder;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonObjectBuilder;
+import jakarta.json.JsonString;
+import jakarta.json.JsonValue;
 import org.apache.jena.datatypes.xsd.XSDDatatype;
-import org.apache.jena.rdf.model.Literal;
 import org.apache.jena.rdf.model.Model;
 import org.apache.jena.rdf.model.ModelFactory;
+import org.apache.jena.rdf.model.RDFNode;
 import org.apache.jena.rdf.model.Resource;
-import org.apache.jena.vocabulary.DCTerms;
 import org.apache.jena.vocabulary.RDF;
 import com.ebremer.lws.server.LwsConfiguration;
 import com.ebremer.lws.server.rdf.RdfFormats;
@@ -25,13 +29,23 @@ import com.ebremer.lws.server.vocab.LWS;
  * {@code lws:service} (and {@code lws:capability}) has domain {@code lws:Storage}, and the
  * notification and search-index discovery examples both carry the {@code service} array on the
  * node typed {@code Storage}. Each service object carries an {@code rdf:type} and a
- * {@code serviceEndpoint} (an {@code xsd:anyURI}, per the vocabulary's stated range):
- * a {@code NotificationService} (with its {@code subscriptionType}s), a {@code StorageDescription}
- * service pointing at this resource (required for discovery), and — when enabled — a
- * {@code TypeIndexService} and a {@code TypeSearchService}.
+ * {@code serviceEndpoint} (an {@code xsd:anyURI}, per the vocabulary's stated range).
  *
- * <p>The canonical representation is {@code application/lws+json} ({@link #buildJson()}); the same
- * description is also available as RDF ({@link #buildModel()}) via content negotiation.
+ * <p><b>One document, two renderings.</b> {@link #buildJson()} is the canonical
+ * {@code application/lws+json} form and {@link #buildModel()} is now <em>derived from it</em>, by
+ * {@link #toModel} walking the same object. They used to be written out separately and had drifted
+ * apart in two ways an operator could not see: the RDF form emitted a capability node carrying only
+ * its {@code rdf:type}, dropping the {@code PatchSupport} media-type map, the negotiable
+ * serializations and the digest algorithms entirely; and only the RDF form said anything about the
+ * description resource itself. A client that negotiated Turtle got a materially poorer answer than
+ * one that took the default, from the endpoint whose whole purpose is telling clients what this
+ * server can do.
+ *
+ * <p>Deriving one from the other is not an invention: an {@code application/lws+json} document
+ * <em>is</em> JSON-LD carrying {@link LWS#JSON_CONTEXT}, so its RDF interpretation maps each
+ * unprefixed term into the LWS namespace. {@link #toModel} does exactly that walk. It also means
+ * {@link #etagBase()} — a hash of the JSON — is a validator for both renderings, which is what makes
+ * the storage description conditionally cacheable at all (finding M22).
  *
  * @author Erich Bremer
  */
@@ -48,71 +62,73 @@ public final class StorageDescriptionService {
     private static final String CONTENT_NEGOTIATION = "https://www.w3.org/ns/lws#ContentNegotiation";
     private static final String DIGEST_FIELDS = "https://www.rfc-editor.org/info/rfc9530";
 
+    /**
+     * The authentication suites this server implements, as protocol-module capability URLs.
+     *
+     * <p>Only {@code OpenID} used to be advertised, though all four are implemented and the README
+     * says so. A client reads this document to decide what to present; advertising one suite told it
+     * the other three were unavailable. Three of the four need no configuration at all — the
+     * credential itself carries everything needed to verify it — so they are advertised
+     * unconditionally, which is not the same "unconditionally" the finding objected to. SAML is the
+     * exception: it is inert until an IdP certificate is configured, so it is advertised only then.
+     */
+    private static final String AUTHN_OPENID = "https://w3c.github.io/lws-protocol/lws10-authn-openid/";
+    private static final String AUTHN_SSI_CID = "https://w3c.github.io/lws-protocol/lws10-authn-ssi-cid/";
+    private static final String AUTHN_DID_KEY = "https://w3c.github.io/lws-protocol/lws10-authn-ssi-did-key/";
+    private static final String AUTHN_SAML = "https://w3c.github.io/lws-protocol/lws10-authn-saml/";
+
     /** The RDF serialisations this storage can read and write (for the ContentNegotiation capability). */
     private static final List<String> RDF_MEDIA_TYPES = List.of(
             RdfFormats.TURTLE, RdfFormats.JSONLD, RdfFormats.NTRIPLES, RdfFormats.RDFXML, RdfFormats.TRIG);
 
+    /**
+     * Keys whose string values name a resource rather than carry a label.
+     *
+     * <p>{@code serviceEndpoint} is the exception to the exception: the LWS vocabulary gives it a
+     * stated range of {@code xsd:anyURI}, so it stays a typed literal rather than becoming a node.
+     */
+    private static final Set<String> IRI_VALUED = Set.of("conformsTo", "storage", "subscriptionType");
+
+    /**
+     * Terms the LWS context does <em>not</em> map into its own namespace.
+     *
+     * <p>{@code conformsTo} is Dublin Core's, and the RDF rendering has always emitted it as such.
+     * The context document itself cannot be consulted to confirm the mapping — {@code JsonLdSecurity}
+     * refuses remote contexts, which is the point of it — so the safe reading is the one that keeps
+     * the well-known term well-known and preserves what this server already published.
+     */
+    private static final Map<String, String> TERM_IRIS =
+            Map.of("conformsTo", org.apache.jena.vocabulary.DCTerms.conformsTo.getURI());
+
+    /** Keys handled structurally by {@link #toModel} rather than emitted as predicates. */
+    private static final Set<String> STRUCTURAL = Set.of("@context", "id", "type");
+
     private final LwsConfiguration config;
+    private final JsonObject document;
+    private final String etagBase;
 
     public StorageDescriptionService(LwsConfiguration config) {
         this.config = config;
+        this.document = buildDocument();
+        // Computed once, in the constructor, exactly as StorageDescriptionServlet's Last-Modified
+        // already was: every input is a final configuration field, so the description cannot change
+        // while the process lives. Nothing here reads a clock, a request or the store.
+        this.etagBase = Etags.sha16(document.toString());
     }
 
-    public Model buildModel() {
-        Model m = ModelFactory.createDefaultModel();
-        m.setNsPrefix(LWS.PREFIX, LWS.NS);
-
-        Resource root = m.createResource(config.storageRootIri());
-        Resource desc = m.createResource(config.storageDescriptionIri());
-
-        root.addProperty(RDF.type, LWS.Storage);
-        root.addProperty(LWS.storageDescription, desc);
-
-        desc.addProperty(RDF.type, LWS.StorageDescription);
-        desc.addProperty(LWS.storage, root);
-
-        // NotificationService advertisement (required for notification support discovery).
-        Resource notifications = m.createResource();
-        notifications.addProperty(RDF.type, LWS.NotificationService);
-        notifications.addProperty(LWS.serviceEndpoint, endpoint(m, config.subscriptionsEndpointIri()));
-        notifications.addProperty(LWS.subscriptionType, LWS.WebhookSubscription);
-        root.addProperty(LWS.service, notifications);
-
-        // Type Index / Type Search service advertisement (lws10-searchindex). A storage that
-        // supports either service MUST advertise it with a service object carrying serviceEndpoint.
-        if (config.searchIndexEnabled()) {
-            root.addProperty(LWS.service, service(m, LWS.TypeIndexService, config.typeIndexEndpointIri()));
-            root.addProperty(LWS.service, service(m, LWS.TypeSearchService, config.typeSearchEndpointIri()));
-        }
-
-        // Access Request / Access Grant services (lws10-core/lws-access-requests), advertising the
-        // access profile they conform to.
-        if (config.accessRequestsEnabled()) {
-            Resource accessRequest = service(m, LWS.AccessRequestService, config.accessRequestsEndpointIri());
-            accessRequest.addProperty(DCTerms.conformsTo, m.createResource(LWS.ACCESS_PROFILE));
-            root.addProperty(LWS.service, accessRequest);
-            Resource accessGrant = service(m, LWS.AccessGrantService, config.accessGrantsEndpointIri());
-            accessGrant.addProperty(DCTerms.conformsTo, m.createResource(LWS.ACCESS_PROFILE));
-            root.addProperty(LWS.service, accessGrant);
-        }
-
-        // Embedded SPARQL endpoint, advertised as a W3C SPARQL Service Description service.
-        if (config.sparqlEndpointEnabled()) {
-            root.addProperty(LWS.service, service(m, m.createResource(SPARQL_SERVICE),
-                    config.sparqlEndpointAdvertisedUrl()));
-        }
-
-        // StorageDescription service (required by discovery): its serviceEndpoint is this resource.
-        root.addProperty(LWS.service, service(m, LWS.StorageDescription, config.storageDescriptionIri()));
-
-        // Storage capabilities. Each is a node typed with the capability's `type`; the feature-specific
-        // detail (PatchSupport's media-type map, etc.) is carried in the canonical lws+json form, since
-        // the LWS vocabulary defines no predicates for it.
-        for (JsonObject capability : capabilities()) {
-            root.addProperty(LWS.capability,
-                    m.createResource().addProperty(RDF.type, m.createResource(capability.getString("type"))));
-        }
-        return m;
+    /**
+     * A validator for the storage description, stable for the life of the process.
+     *
+     * <p>It used to be {@code Etags.forModel(buildModel())}, computed per request over a model whose
+     * service and capability nodes are <em>blank</em>. {@code forModel} serializes to N-Triples and
+     * sorts the lines, which makes it order-independent but not blank-node-independent: Jena mints a
+     * fresh label per model instance, so two calls on identical content produced different tags —
+     * measured, {@code 40ec162e5e06c3d7} against {@code d699cc4ca046b387}. A conditional {@code GET}
+     * on discovery could therefore never return {@code 304}: every polling client re-transferred the
+     * whole document, and a shared cache accumulated one entry per request (finding M22).
+     */
+    public String etagBase() {
+        return etagBase;
     }
 
     /**
@@ -120,6 +136,20 @@ public final class StorageDescriptionService {
      * primary node is the storage, carrying its capabilities and service objects.
      */
     public String buildJson() {
+        return document.toString();
+    }
+
+    /** The same description as RDF, derived from {@link #buildJson()} so the two cannot disagree. */
+    public Model buildModel() {
+        Model m = ModelFactory.createDefaultModel();
+        m.setNsPrefix(LWS.PREFIX, LWS.NS);
+        toModel(m, document);
+        return m;
+    }
+
+    // ----- the one document both renderings come from -----
+
+    private JsonObject buildDocument() {
         JsonArrayBuilder services = Json.createArrayBuilder();
         services.add(Json.createObjectBuilder()
                 .add("type", "NotificationService")
@@ -149,9 +179,16 @@ public final class StorageDescriptionService {
                 .add("@context", LWS.JSON_CONTEXT)
                 .add("id", config.storageRootIri())
                 .add("type", "Storage")
+                // The description resource, named and typed here rather than only in the RDF
+                // rendering. A nested node, not a second top-level one: the document's primary node
+                // is the storage, and clients read `id`/`type` off the top level.
+                .add("storageDescription", Json.createObjectBuilder()
+                        .add("id", config.storageDescriptionIri())
+                        .add("type", "StorageDescription")
+                        .add("storage", config.storageRootIri()))
                 .add("capability", capabilities)
                 .add("service", services)
-                .build().toString();
+                .build();
     }
 
     /**
@@ -164,8 +201,14 @@ public final class StorageDescriptionService {
     private List<JsonObject> capabilities() {
         List<JsonObject> caps = new ArrayList<>();
         caps.add(typeOnly("https://w3c.github.io/lws-protocol/lws10-core/"));
-        caps.add(typeOnly("https://w3c.github.io/lws-protocol/lws10-authn-openid/"));
         caps.add(typeOnly("https://w3c.github.io/lws-protocol/lws10-notifications/"));
+        // Every authentication suite that is actually usable on this deployment; see the constants.
+        caps.add(typeOnly(AUTHN_OPENID));
+        caps.add(typeOnly(AUTHN_SSI_CID));
+        caps.add(typeOnly(AUTHN_DID_KEY));
+        if (config.samlEnabled()) {
+            caps.add(typeOnly(AUTHN_SAML));
+        }
         if (config.searchIndexEnabled()) {
             caps.add(typeOnly("https://w3c.github.io/lws-protocol/lws10-searchindex/"));
         }
@@ -175,8 +218,11 @@ public final class StorageDescriptionService {
 
         // PatchSupport: which PATCH content types are accepted for each target representation.
         JsonObjectBuilder patchMap = Json.createObjectBuilder();
+        // SPARQL Update only: JSON Merge Patch is not defined over RDF and is refused with 415
+        // (finding H21). A capability document that advertises an operation the server rejects is
+        // worse than one that omits it — it is what a conformance client reads to decide what to send.
         for (String rdf : RDF_MEDIA_TYPES) {
-            patchMap.add(rdf, arr("application/sparql-update", "application/merge-patch+json"));
+            patchMap.add(rdf, arr("application/sparql-update"));
         }
         patchMap.add("application/json", arr("application/merge-patch+json", "application/json-patch+json"));
         patchMap.add("application/linkset+json",
@@ -197,6 +243,83 @@ public final class StorageDescriptionService {
                 .add("algorithm", arr("sha-256", "sha-512"))
                 .build());
         return caps;
+    }
+
+    // ----- JSON-LD -> RDF, over the LWS context's term mapping -----
+
+    /**
+     * Interpret one lws+json node as RDF and return the node it became.
+     *
+     * <p>The rules are the LWS JSON-LD context's: {@code id} is the node, {@code type} is
+     * {@code rdf:type}, {@code @context} is not data, and every other key is the term of that name in
+     * the LWS namespace. A nested object is a node of its own; an array is the key repeated. A string
+     * value is a resource when the key is one that names things ({@link #IRI_VALUED}) and a literal
+     * otherwise — except {@code serviceEndpoint}, whose stated range is {@code xsd:anyURI}.
+     */
+    private static Resource toModel(Model m, JsonObject node) {
+        String id = stringOf(node.get("id"));
+        Resource subject = id == null ? m.createResource() : m.createResource(id);
+        for (String term : stringsOf(node.get("type"))) {
+            subject.addProperty(RDF.type, m.createResource(expand(term)));
+        }
+        for (Map.Entry<String, JsonValue> entry : node.entrySet()) {
+            if (STRUCTURAL.contains(entry.getKey())) {
+                continue;
+            }
+            String predicate = TERM_IRIS.getOrDefault(entry.getKey(), LWS.NS + entry.getKey());
+            for (RDFNode object : objectsOf(m, entry.getKey(), entry.getValue())) {
+                subject.addProperty(m.createProperty(predicate), object);
+            }
+        }
+        return subject;
+    }
+
+    private static List<RDFNode> objectsOf(Model m, String term, JsonValue value) {
+        List<RDFNode> out = new ArrayList<>();
+        switch (value.getValueType()) {
+            case ARRAY -> value.asJsonArray().forEach(v -> out.addAll(objectsOf(m, term, v)));
+            case OBJECT -> out.add(toModel(m, value.asJsonObject()));
+            case STRING -> {
+                String s = ((JsonString) value).getString();
+                if (term.equals("serviceEndpoint")) {
+                    out.add(m.createTypedLiteral(s, XSDDatatype.XSDanyURI));
+                } else if (IRI_VALUED.contains(term)) {
+                    out.add(m.createResource(expand(s)));
+                } else {
+                    out.add(m.createLiteral(s));
+                }
+            }
+            case NUMBER, TRUE, FALSE -> out.add(m.createLiteral(value.toString()));
+            default -> { /* null: no statement */ }
+        }
+        return out;
+    }
+
+    /** A bare term is in the LWS namespace; anything already absolute stays as it is. */
+    private static String expand(String term) {
+        return term.contains(":") ? term : LWS.NS + term;
+    }
+
+    private static String stringOf(JsonValue value) {
+        return value != null && value.getValueType() == JsonValue.ValueType.STRING
+                ? ((JsonString) value).getString() : null;
+    }
+
+    private static List<String> stringsOf(JsonValue value) {
+        List<String> out = new ArrayList<>();
+        if (value == null) {
+            return out;
+        }
+        if (value.getValueType() == JsonValue.ValueType.ARRAY) {
+            for (JsonValue v : value.asJsonArray()) {
+                if (v.getValueType() == JsonValue.ValueType.STRING) {
+                    out.add(((JsonString) v).getString());
+                }
+            }
+        } else if (value.getValueType() == JsonValue.ValueType.STRING) {
+            out.add(((JsonString) value).getString());
+        }
+        return out;
     }
 
     private static JsonObject typeOnly(String type) {
@@ -221,13 +344,13 @@ public final class StorageDescriptionService {
         return Json.createObjectBuilder().add("type", type).add("serviceEndpoint", endpointIri);
     }
 
-    private static Resource service(Model m, Resource type, String endpointIri) {
-        return m.createResource()
-                .addProperty(RDF.type, type)
-                .addProperty(LWS.serviceEndpoint, endpoint(m, endpointIri));
-    }
-
-    private static Literal endpoint(Model m, String uri) {
-        return m.createTypedLiteral(uri, XSDDatatype.XSDanyURI);
+    /** The advertised capability type IRIs, for tests and tooling. */
+    public List<String> capabilityTypes() {
+        List<String> types = new ArrayList<>();
+        JsonArray caps = document.getJsonArray("capability");
+        for (JsonValue v : caps) {
+            types.add(v.asJsonObject().getString("type", null));
+        }
+        return types;
     }
 }

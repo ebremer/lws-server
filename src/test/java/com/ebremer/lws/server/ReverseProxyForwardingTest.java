@@ -45,6 +45,9 @@ class ReverseProxyForwardingTest {
     private static String schemeSeenByServer(boolean behindProxy) throws Exception {
         Properties p = new Properties();
         p.setProperty("lws.base-uri", "https://storage.example");
+        // An owner, because this class asserts nothing about authorization and the
+        // development posture now has to be asked for explicitly.
+        p.setProperty("lws.owners", "https://owner.example/profile#me");
         p.setProperty("lws.behind-proxy", String.valueOf(behindProxy));
         LwsConfiguration config = LwsConfiguration.of(p);
 

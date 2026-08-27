@@ -19,6 +19,11 @@
         .box { border: 1px solid #e0e0e0; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
         button { padding: 0.3rem 0.8rem; }
         .del { color: #a00; margin-left: 0.6rem; font-size: 0.85em; }
+        /* Destructive actions are POST forms (CSRF), styled to read like the links they replaced. */
+        .inlineform { display: inline; margin: 0; }
+        button.linkbutton { background: none; border: none; padding: 0; font: inherit; cursor: pointer;
+            color: #cfe0ff; text-decoration: none; }
+        button.del { background: none; border: none; cursor: pointer; font: inherit; }
     </style>
 </head>
 <body>
@@ -27,7 +32,7 @@
         <span class="grow"></span>
         <span>Signed in as: <b wicket:id="principal">anonymous</b></span>
         <a wicket:id="signin">Sign in</a>
-        <a wicket:id="signout">Sign out</a>
+        <form wicket:id="signout" class="inlineform"><button type="submit" class="linkbutton">Sign out</button></form>
     </div>
     <div class="content">
         <div wicket:id="feedback"></div>

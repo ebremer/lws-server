@@ -1,13 +1,17 @@
 package com.ebremer.lws.server;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Properties;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Tests the reverse-proxy / TLS posture configuration: the {@code lws.behind-proxy} and
@@ -21,6 +25,9 @@ class LwsConfigurationTest {
     private static LwsConfiguration of(String baseUri, String... extra) {
         Properties p = new Properties();
         p.setProperty("lws.base-uri", baseUri);
+        // An owner by default, so these cases exercise the transport and TLS postures rather than
+        // tripping the open-mode refusal first. Cases that are about that refusal override it.
+        p.setProperty("lws.owners", "https://owner.example/profile#me");
         for (int i = 0; i + 1 < extra.length; i += 2) {
             p.setProperty(extra[i], extra[i + 1]);
         }
@@ -120,5 +127,55 @@ class LwsConfigurationTest {
     void rejectsNonHttpBaseUri() {
         LwsConfigurationException ex = assertThrows(LwsConfigurationException.class, () -> of("ftp://nope.example"));
         assertTrue(ex.getMessage().contains("lws.base-uri"), ex.getMessage());
+    }
+
+    // ----- H17: a configuration file that exists but cannot be read -----
+
+    /**
+     * Finding H17. Every setting falls back to a development default, so swallowing a read failure
+     * turns the <em>hardening</em> step into the vulnerability: an operator does {@code chmod 600}
+     * on the file because it holds {@code lws.oidc.client-secret}, the unprivileged service can no
+     * longer read it, {@code lws.owners} comes back empty, and open mode makes
+     * {@code DefaultAccessPolicy} permit everything.
+     */
+    @Test
+    void refusesToStartWhenTheConfigurationFileCannotBeRead(@TempDir Path dir) throws Exception {
+        // A directory where the file should be: unreadable as a file on every platform, unlike
+        // chmod, which an administrator would sail past anyway.
+        Path unreadable = Files.createDirectory(dir.resolve("lws.properties"));
+        Properties p = new Properties();
+
+        LwsConfigurationException e = assertThrows(LwsConfigurationException.class,
+                () -> LwsConfiguration.mergeOptionalFile(p, unreadable));
+        assertTrue(e.getMessage().contains("Cannot read"), e.getMessage());
+    }
+
+    /** A malformed escape is a read failure too, not a reason to fall back to the defaults. */
+    @Test
+    void refusesToStartOnAMalformedConfigurationFile(@TempDir Path dir) throws Exception {
+        // Built without a literal backslash-u in this source: the Java lexer would reject it
+        // here before the string ever existed.
+        String malformed = "lws.base-uri=http://x" + (char) 92 + "uZZZZ";
+        Path file = Files.writeString(dir.resolve("lws.properties"), malformed);
+        Properties p = new Properties();
+
+        assertThrows(LwsConfigurationException.class, () -> LwsConfiguration.mergeOptionalFile(p, file));
+    }
+
+    /** But an absent file is a supported way to run, and must stay silent. */
+    @Test
+    void toleratesAnAbsentConfigurationFile(@TempDir Path dir) {
+        Properties p = new Properties();
+        assertDoesNotThrow(() -> LwsConfiguration.mergeOptionalFile(p, dir.resolve("nothing-here.properties")));
+        assertTrue(p.isEmpty());
+    }
+
+    /** And a readable one is merged. */
+    @Test
+    void readsAConfigurationFileThatIsThere(@TempDir Path dir) throws Exception {
+        Path file = Files.writeString(dir.resolve("lws.properties"), "lws.owners=https://alice.example/#me");
+        Properties p = new Properties();
+        LwsConfiguration.mergeOptionalFile(p, file);
+        assertEquals("https://alice.example/#me", p.getProperty("lws.owners"));
     }
 }

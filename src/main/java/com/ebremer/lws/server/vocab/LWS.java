@@ -112,7 +112,12 @@ public final class LWS {
     /** The owner (WebID / controlled identifier) of a resource (administrative). */
     public static final Property owner = p("owner");
     /** Whether a resource is publicly readable (administrative). */
-    public static final Property publicRead = p("publicRead");
+    /**
+     * Marks a root ACL this server wrote itself in development mode, with no owners configured
+     * (administrative). It is what lets the bootstrap tell its own placeholder apart from an ACL
+     * an operator wrote deliberately, so only the former is ever replaced.
+     */
+    public static final Property developmentBootstrap = p("developmentBootstrap");
     /** The opaque entity-tag of a resource (administrative). */
     public static final Property etag = p("etag");
     /** The storage-relative key of a non-RDF resource's binary content (administrative). */

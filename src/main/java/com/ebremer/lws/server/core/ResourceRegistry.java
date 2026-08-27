@@ -3,6 +3,7 @@ package com.ebremer.lws.server.core;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.apache.jena.datatypes.xsd.XSDDatatype;
 import org.apache.jena.query.ParameterizedSparqlString;
@@ -104,6 +105,92 @@ public final class ResourceRegistry {
         return out;
     }
 
+    /**
+     * Listing metadata for a named subset of a container's children, in the given order.
+     *
+     * <p>Exists so a paginated listing fetches one page's worth of media types, sizes and modified
+     * times instead of the whole membership's: page 1 of a 200,000-member container used to cost the
+     * same as page 200, because {@link #childDescriptions} materialised every member's metadata
+     * before the servlet sliced a thousand out of it (finding M23).
+     *
+     * <p>The parent constraint is kept, not just the {@code VALUES} filter. Without it this would be
+     * "describe any IRI you name", which is a different and much less careful method than the one
+     * the caller thinks it is calling.
+     */
+    public List<ChildDesc> describe(RDFConnection conn, String containerIri, List<String> childIris) {
+        if (childIris.isEmpty()) {
+            return List.of();
+        }
+        ParameterizedSparqlString q = new ParameterizedSparqlString();
+        // Bound by appending IRIs rather than by named variables: `?c` and a `?c0`-style parameter
+        // share a prefix, and ParameterizedSparqlString substitutes by name over its command text.
+        //
+        // Which means the escaping is this method's own responsibility. Every IRI reaching here comes
+        // from the registry, which built it from a request target the servlet container has already
+        // rejected the dangerous characters from — but that is a fact about a caller, and one new
+        // caller away from being wrong. Anything that could terminate the IRI reference or start a
+        // new clause is refused outright rather than encoded, because such an IRI cannot name a
+        // resource this server ever minted, so dropping it loses nothing.
+        StringBuilder values = new StringBuilder();
+        for (String iri : childIris) {
+            if (!isSafeIriReference(iri)) {
+                continue;
+            }
+            values.append('<').append(iri).append("> ");
+        }
+        if (values.isEmpty()) {
+            return List.of();
+        }
+        q.setCommandText("""
+                SELECT ?c ?t ?fmt ?size ?mod WHERE {
+                  VALUES ?c { %s }
+                  GRAPH ?g {
+                    ?c <%s> ?container ; a ?t .
+                    OPTIONAL { ?c <%s> ?fmt }
+                    OPTIONAL { ?c <%s> ?size }
+                    OPTIONAL { ?c <%s> ?mod }
+                  }
+                }""".formatted(values.toString().trim(), LWS.parent.getURI(), DCTerms.format.getURI(),
+                LWS.byteSize.getURI(), DCTerms.modified.getURI()));
+        q.setIri("g", adminGraph);
+        q.setIri("container", containerIri);
+        Map<String, ChildDesc> byIri = new java.util.HashMap<>();
+        conn.querySelect(q.asQuery(), row -> {
+            boolean container = row.getResource("t").getURI().equals(LWS.Container.getURI());
+            String mediaType = row.contains("fmt") ? row.getLiteral("fmt").getString() : null;
+            long size = row.contains("size") ? row.getLiteral("size").getLong() : -1L;
+            Instant modified = row.contains("mod") ? Instant.parse(row.getLiteral("mod").getString()) : null;
+            String iri = row.getResource("c").getURI();
+            byIri.put(iri, new ChildDesc(iri, container, mediaType, size, modified));
+        });
+        // The caller's order, which is the page order it computed; the query's is unspecified.
+        List<ChildDesc> out = new ArrayList<>(childIris.size());
+        for (String iri : childIris) {
+            ChildDesc desc = byIri.get(iri);
+            if (desc != null) {
+                out.add(desc);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Whether {@code iri} can be written into a SPARQL {@code IRIREF} as-is.
+     *
+     * <p>SPARQL 1.1's {@code IRIREF} production excludes {@code <>"{}|^`\} and every character below
+     * {@code 0x21}, which is exactly the set that could end the reference or begin something else.
+     * Resource IRIs are built from a request target, so none of them can contain any of it.
+     */
+    private static boolean isSafeIriReference(String iri) {
+        for (int i = 0; i < iri.length(); i++) {
+            char c = iri.charAt(i);
+            if (c <= 0x20 || "<>\"{}|^`\\".indexOf(c) >= 0) {
+                return false;
+            }
+        }
+        return !iri.isEmpty();
+    }
+
     /** The direct children of a container with listing metadata (type, media type, size, modified). */
     public List<ChildDesc> childDescriptions(RDFConnection conn, String containerIri) {
         ParameterizedSparqlString q = new ParameterizedSparqlString();
@@ -186,7 +273,6 @@ public final class ResourceRegistry {
         if (r.owner() != null) {
             s.addProperty(LWS.owner, m.createResource(r.owner()));
         }
-        s.addLiteral(LWS.publicRead, r.publicRead());
         return m;
     }
 
@@ -208,10 +294,9 @@ public final class ResourceRegistry {
         long size = s.hasProperty(LWS.byteSize) ? s.getProperty(LWS.byteSize).getLong() : -1L;
         String binaryKey = string(s, LWS.binaryKey);
         String owner = s.hasProperty(LWS.owner) ? s.getProperty(LWS.owner).getResource().getURI() : null;
-        boolean publicRead = s.hasProperty(LWS.publicRead) && s.getProperty(LWS.publicRead).getBoolean();
         String digest = string(s, LWS.contentSha256);
         return new LwsResource(iri, type, parent, created, modified, etag, contentType, size, binaryKey,
-                owner, publicRead, digest);
+                owner, digest);
     }
 
     private static Instant instant(Resource s, org.apache.jena.rdf.model.Property p) {

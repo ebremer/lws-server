@@ -105,6 +105,12 @@ public final class AccessServlet extends HttpServlet {
             if (e.status() == 401) {
                 HttpSupport.setUnauthorizedHeaders(resp, config);
             }
+            if (e.status() == 405) {
+                // Mandatory on a 405 (RFC 9110 §15.5.6), and it was the one status here that
+                // omitted it. The same list the OPTIONS branch above hands out.
+                resp.setHeader("Allow", collection
+                        ? "GET, HEAD, POST, OPTIONS" : "GET, HEAD, DELETE, OPTIONS");
+            }
             sendProblem(resp, e.status(), e.getMessage());
         } catch (RuntimeException e) {
             log.error("Error handling {} {}", req.getMethod(), path, e);
@@ -117,11 +123,17 @@ public final class AccessServlet extends HttpServlet {
         if (LwsPrincipal.isAnonymous(principal)) {
             throw LwsException.unauthorized("Authentication required");
         }
+        // Answered separately from the controller test below so the operator gets a reason rather
+        // than a shrug: nobody is a controller here, so no wording about "only a controller" helps.
+        if (kind == Kind.GRANT && config.isOpenMode()) {
+            throw LwsException.forbidden("This storage has no controller: lws.owners is empty, so no "
+                    + "agent is entitled to issue an access grant. Set lws.owners and restart.");
+        }
         if (kind == Kind.GRANT && !isController(principal)) {
             throw LwsException.forbidden("Only a storage controller may issue access grants");
         }
-        requireJsonContentType(req);
-        Record record = access.create(principal, kind, HttpSupport.readBody(req));
+        HttpSupport.requireJsonContentType(req);
+        Record record = access.create(principal, kind, HttpSupport.readBody(req, config.maxRequestBytes()));
         // SHOULD: notify the relevant inboxes — the document's own inbox, the storage controller
         // (new request), and the associated request's inbox (new grant).
         for (String inbox : access.notificationInboxes(record)) {
@@ -183,9 +195,20 @@ public final class AccessServlet extends HttpServlet {
 
     // ----- authorization helpers -----
 
-    /** A storage controller is an agent with Control over the storage root. */
+    /**
+     * A storage controller is an agent with Control over the storage root — and only where the
+     * storage has a configured controller at all.
+     *
+     * <p>The {@code isOpenMode()} clause is what makes that second half true. With
+     * {@code lws.owners} empty, <em>every</em> authorization model answers yes to every Control
+     * question: the owner policy because nothing is configured, and WAC because the bootstrapped
+     * root ACL opens the storage to the public. Reading either answer as "this agent was entrusted
+     * with the storage" is H22 — a self-signed {@code did:key} issued itself a storage-wide access
+     * grant that then outlived a restart, an owner list and a switch to WAC.
+     */
     private boolean isController(LwsPrincipal principal) {
-        return !LwsPrincipal.isAnonymous(principal) && resources.canControl(principal, config.storageRootIri());
+        return !config.isOpenMode() && !LwsPrincipal.isAnonymous(principal)
+                && resources.canControl(principal, config.storageRootIri());
     }
 
     private static boolean isCreator(LwsPrincipal principal, Record record) {
@@ -222,21 +245,14 @@ public final class AccessServlet extends HttpServlet {
                     }
                 }
             }
-        } catch (RuntimeException ignored) {
-            // malformed stored document: no assignees
+        } catch (RuntimeException | StackOverflowError ignored) {
+            // malformed stored document: no assignees. The Error arm matters because a document
+            // deep enough to overflow the parser is not a RuntimeException.
         }
         return out;
     }
 
     // ----- response helpers -----
-
-    private void requireJsonContentType(HttpServletRequest req) {
-        String ct = req.getContentType();
-        String mt = ct == null ? "" : RdfFormats.stripParameters(ct);
-        if (!mt.equals(HttpSupport.LWS_JSON) && !mt.equals("application/ld+json") && !mt.equals("application/json")) {
-            throw LwsException.unsupportedMediaType("Request body must be " + HttpSupport.LWS_JSON);
-        }
-    }
 
     private void writeJson(HttpServletResponse resp, String json, boolean body) throws IOException {
         byte[] bytes = json.getBytes(StandardCharsets.UTF_8);

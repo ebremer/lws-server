@@ -28,6 +28,7 @@ import org.shredzone.acme4j.util.KeyPairUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.ebremer.lws.server.LwsConfiguration;
+import com.ebremer.lws.server.core.SecureFiles;
 
 /**
  * Provisions and renews an X.509 certificate from an ACME CA (Let's Encrypt by default) using the
@@ -62,6 +63,15 @@ public final class AcmeCertificateManager {
         this.config = config;
         this.challenges = challenges;
         Path dir = config.tlsDir();
+        // Here and not only in acquire(). acquire() runs when a certificate has to be obtained, which
+        // an ordinary restart with a valid certificate never does — so an operator upgrading from a
+        // version that created tls/ world-readable would have kept it that way for the whole life of
+        // the certificate, while the release note said the directory was tightened at startup.
+        try {
+            SecureFiles.createDirectoriesOwnerOnly(dir);
+        } catch (IOException e) {
+            log.warn("Could not create or restrict the TLS directory {}: {}", dir, e.toString());
+        }
         this.accountKeyFile = dir.resolve("account.key");
         this.domainKeyFile = dir.resolve("domain.key");
         this.chainFile = dir.resolve("domain-chain.crt");
@@ -102,7 +112,7 @@ public final class AcmeCertificateManager {
     // ----- ACME flow -----
 
     private void acquire() throws AcmeException, IOException {
-        Files.createDirectories(config.tlsDir());
+        SecureFiles.createDirectoriesOwnerOnly(config.tlsDir()); // idempotent; also done at construction
         KeyPair accountKey = loadOrCreateKey(accountKeyFile, KeyPairUtils::createKeyPair);
         Session session = new Session(config.acmeDirectoryUrl());
         Account account = registerAccount(session, accountKey);
@@ -185,6 +195,15 @@ public final class AcmeCertificateManager {
         }
     }
 
+    /**
+     * Load a PEM key pair, or generate and persist one.
+     *
+     * <p>Written owner-only and atomically (finding M26). Both of these files are private keys —
+     * the ACME <em>account</em> key, which authorizes certificate issuance and revocation for the
+     * configured domains, and the <em>domain</em> key, which is the TLS server key itself. A plain
+     * {@code Files.newBufferedWriter} gave them the process umask, so any local user could read
+     * them; and a truncate-then-write leaves a partial key if the process dies mid-write.
+     */
     private static KeyPair loadOrCreateKey(Path file, Supplier<KeyPair> factory) throws IOException {
         if (Files.exists(file)) {
             try (var reader = Files.newBufferedReader(file)) {
@@ -192,8 +211,11 @@ public final class AcmeCertificateManager {
             }
         }
         KeyPair keyPair = factory.get();
-        try (var writer = Files.newBufferedWriter(file)) {
-            KeyPairUtils.writeKeyPair(keyPair, writer);
+        if (!SecureFiles.writeOwnerOnly(file, writer -> KeyPairUtils.writeKeyPair(keyPair, writer))) {
+            // Another process created it in the meantime; its key is the one that counts.
+            try (var reader = Files.newBufferedReader(file)) {
+                return KeyPairUtils.readKeyPair(reader);
+            }
         }
         return keyPair;
     }

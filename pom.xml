@@ -8,10 +8,34 @@
 
     <name>LWS Server</name>
     <description>Linked Web Storage server implementing the W3C LWS Protocol</description>
+    <inceptionYear>2026</inceptionYear>
+
+    <licenses>
+        <license>
+            <name>The Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <name>Erich Bremer</name>
+            <email>erich@ebremer.com</email>
+        </developer>
+    </developers>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>25</maven.compiler.release>
+        <!-- A fixed timestamp makes the jar byte-identical across rebuilds of the same source, so a
+             published artifact can be checked against a build of the tag it claims to come from. -->
+        <project.build.outputTimestamp>2026-01-01T00:00:00Z</project.build.outputTimestamp>
+        <maven-surefire-plugin.version>3.5.4</maven-surefire-plugin.version>
+        <maven-enforcer-plugin.version>3.5.0</maven-enforcer-plugin.version>
+        <jakarta-json.version>2.1.3</jakarta-json.version>
+        <bouncycastle.version>1.84</bouncycastle.version>
+        <parsson.version>1.1.7</parsson.version>
         <exec.mainClass>com.ebremer.lws.server.LwsServer</exec.mainClass>
 
         <!-- Spring Boot is used ONLY to bootstrap embedded Jetty. Keep its surface area tiny:
@@ -19,7 +43,6 @@
         <spring-boot.version>3.5.13</spring-boot.version>
 
         <jena.version>5.6.0</jena.version>
-        <shiro.version>2.2.0</shiro.version>
         <pac4j.version>6.1.2</pac4j.version>
         <jakartaee-pac4j.version>8.0.1</jakartaee-pac4j.version>
         <oauth-oidc-sdk.version>11.23.1</oauth-oidc-sdk.version>
@@ -39,31 +62,74 @@
                 <scope>import</scope>
             </dependency>
 
-            <!-- Jena 5.6.0 needs commons-lang3 >= 3.18 (BasicThreadFactory.builder()), but the
-                 Spring Boot BOM pins 3.17.0. A direct management entry wins over the imported BOM. -->
+            <!-- Jena needs commons-lang3 >= 3.18 (BasicThreadFactory.builder()) while the Spring
+                 Boot BOM pins older; jena-arq 5.6.0 now asks for 3.19.0, so this is the upper bound
+                 across every path. A direct management entry wins over the imported BOM. -->
             <dependency>
                 <groupId>org.apache.commons</groupId>
                 <artifactId>commons-lang3</artifactId>
-                <version>3.18.0</version>
+                <version>3.19.0</version>
             </dependency>
 
-            <!-- Align all Bouncy Castle modules: acme4j 5.1.0 pulls bcpkix/bcutil 1.83 while another
-                 dependency pins bcprov 1.80; bcpkix 1.83 expects the matching bcprov, so lift them
-                 all to 1.83 to avoid a split-version NoSuchMethodError at runtime. -->
+            <!-- jena-base 5.6.0 asks for commons-codec 1.19.0; the Spring Boot BOM pins 1.18.0. -->
+            <dependency>
+                <groupId>commons-codec</groupId>
+                <artifactId>commons-codec</artifactId>
+                <version>1.19.0</version>
+            </dependency>
+
+            <!-- Align all Bouncy Castle modules on one version. The modules are not independently
+                 versioned in practice — bcpkix expects the matching bcprov, and a split pair is a
+                 NoSuchMethodError at runtime rather than a build failure. acme4j pulls bcpkix/bcutil
+                 and pac4j-jwt pulls bcprov, and the highest any of them asks for is 1.84, so all
+                 three are lifted together. Keep them equal when bumping. -->
             <dependency>
                 <groupId>org.bouncycastle</groupId>
                 <artifactId>bcprov-jdk18on</artifactId>
-                <version>1.83</version>
+                <version>${bouncycastle.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.bouncycastle</groupId>
                 <artifactId>bcpkix-jdk18on</artifactId>
-                <version>1.83</version>
+                <version>${bouncycastle.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.bouncycastle</groupId>
                 <artifactId>bcutil-jdk18on</artifactId>
-                <version>1.83</version>
+                <version>${bouncycastle.version}</version>
+            </dependency>
+
+            <!-- Three artifacts that arrive only transitively, at two or three different versions
+                 each, and are pinned here purely so the resolved graph converges: Maven would
+                 otherwise pick one by tree depth, which is a property of the dependency graph's shape
+                 rather than of what any of these libraries needs. Each is set to the highest version
+                 any path asks for. -->
+            <dependency>
+                <groupId>com.google.errorprone</groupId>
+                <artifactId>error_prone_annotations</artifactId>
+                <version>2.43.0</version>
+            </dependency>
+            <dependency>
+                <groupId>commons-io</groupId>
+                <artifactId>commons-io</artifactId>
+                <version>2.21.0</version>
+            </dependency>
+            <dependency>
+                <groupId>org.ow2.asm</groupId>
+                <artifactId>asm</artifactId>
+                <version>9.9.1</version>
+            </dependency>
+
+            <!-- Shiro is no longer used by this server (finding H20) but jena-fuseki-main declares
+                 shiro-core and shiro-web:jakarta directly, at the 2.0.5 its parent POM pins. This
+                 entry keeps shiro-core where it has always resolved rather than letting the removal
+                 of our own dependency silently move it, which is a change to the optional SPARQL
+                 endpoint's runtime and not something H20 asked for. Drop it if Fuseki ever stops
+                 requiring Shiro. -->
+            <dependency>
+                <groupId>org.apache.shiro</groupId>
+                <artifactId>shiro-core</artifactId>
+                <version>2.2.0</version>
             </dependency>
 
             <!-- Align every pac4j core module to one version. jakartaee-pac4j 8.0.1 defaults to
@@ -122,20 +188,30 @@
             <version>${jena.version}</version>
         </dependency>
         <dependency>
-            <!-- Embeddable Fuseki: optional, opt-in SPARQL endpoint over the local TDB2 dataset. -->
+            <!-- Embeddable Fuseki: the opt-in SPARQL endpoint over the local TDB2 dataset
+                 (lws.sparql.enabled, default false).
+
+                 Marked <optional> because it is by far the heaviest thing in the build for a feature
+                 that is off by default: it pulls Fuseki, Prometheus, micrometer, TDB1, SHACL/ShEx and
+                 a milestone commons-fileupload2. A deployment that wants the endpoint declares this
+                 artifact itself; one that does not gets a much smaller jar and a much smaller
+                 vulnerability surface. LwsComponents already treats the endpoint as absent unless it
+                 is switched on, and SparqlEndpoint is only touched on that path. -->
             <groupId>org.apache.jena</groupId>
             <artifactId>jena-fuseki-main</artifactId>
             <version>${jena.version}</version>
+            <optional>true</optional>
         </dependency>
 
-        <!-- ===== AuthN/AuthZ: Apache Shiro (core only) + pac4j (Jakarta) ===== -->
-        <dependency>
-            <!-- shiro-core has no servlet dependency, so it is Jakarta/Javax neutral.
-                 We bind the Shiro Subject to each request inside our own Jakarta filter. -->
-            <groupId>org.apache.shiro</groupId>
-            <artifactId>shiro-core</artifactId>
-            <version>${shiro.version}</version>
-        </dependency>
+        <!-- ===== AuthN/AuthZ: pac4j (Jakarta) =====
+             Apache Shiro used to be a direct dependency here. Nothing ever read the Subject it built
+             - authorization is decided by com.ebremer.lws.server.core.Authorizer from the resource
+             IRI and mode - while the per-request login() it needed created a 30-minute in-memory
+             session each time and never logged out, which self-issued did:key credentials made into
+             an unauthenticated heap exhaustion (finding H20). It is gone from the source; what
+             remains of it arrives only through the OPTIONAL jena-fuseki-main above, which declares
+             shiro-core and shiro-web itself, so a deployment that does not opt into the embedded
+             SPARQL endpoint gets no Shiro at all. See the dependencyManagement entry for the pin. -->
         <dependency>
             <!-- Jakarta EE web integration for pac4j (JEEContext, SecurityFilter, CallbackFilter). -->
             <groupId>org.pac4j</groupId>
@@ -179,10 +255,42 @@
             <artifactId>caffeine</artifactId>
         </dependency>
 
+        <!-- ===== JSON-P (jakarta.json) =====
+             Every LWS JSON document — notifications, subscriptions, access grants, linksets, the
+             storage description, JSON Patch and Merge Patch — is built with this API, and it used to
+             arrive only as an undeclared transitive of something else. That is a dependency this
+             project's own source imports directly, so it is declared directly: an upstream that
+             stops shipping it, or ships a different version, should be a build failure here rather
+             than a runtime NoClassDefFoundError. -->
+        <dependency>
+            <groupId>jakarta.json</groupId>
+            <artifactId>jakarta.json-api</artifactId>
+            <version>${jakarta-json.version}</version>
+        </dependency>
+        <dependency>
+            <!-- The reference implementation of the API above. Runtime-only: nothing compiles
+                 against Parsson, and Json.createReader() needs a provider on the classpath. -->
+            <groupId>org.eclipse.parsson</groupId>
+            <artifactId>parsson</artifactId>
+            <version>${parsson.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+
         <!-- ===== Test ===== -->
         <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-test</artifactId>
+            <!-- JUnit Jupiter, declared directly. This was spring-boot-starter-test, which brought
+                 seventeen jars — AssertJ, Hamcrest, Mockito, JSONassert, XMLUnit, the Spring test
+                 context — for a suite that uses none of them. Its version still comes from the Spring
+                 Boot BOM, so it stays aligned with the rest of the build. -->
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- The one test class that mocks (AuthenticationFilterTest, over the servlet API),
+                 declared on its own rather than arriving inside the starter above. -->
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -206,6 +314,43 @@
                 </configuration>
             </plugin>
             <plugin>
+                <!-- Pinned, because an unpinned plugin version means the build that ships is not
+                     necessarily the build that was tested. -->
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>${maven-surefire-plugin.version}</version>
+            </plugin>
+            <plugin>
+                <!-- Convergence: when two paths through the tree ask for different versions of the
+                     same artifact, Maven silently picks one by depth. This POM already documents
+                     three such incidents; making them build failures is how the fourth gets noticed
+                     when it appears rather than when it misbehaves. requireUpperBoundDeps catches the
+                     related case where a transitive wants a NEWER version than the one resolved. -->
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>${maven-enforcer-plugin.version}</version>
+                <executions>
+                    <execution>
+                        <id>enforce-dependency-hygiene</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <dependencyConvergence/>
+                                <requireUpperBoundDeps/>
+                                <requireMavenVersion>
+                                    <version>[3.9,)</version>
+                                </requireMavenVersion>
+                                <requireJavaVersion>
+                                    <version>[25,)</version>
+                                </requireJavaVersion>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
                 <!-- The ONLY Spring-specific build element. Produces an executable jar and enables
                      `mvn spring-boot:run`. When migrating to bare Jetty, replace with shade/assembly. -->
                 <groupId>org.springframework.boot</groupId>
@@ -224,4 +369,41 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <profile>
+            <!-- Software bill of materials. Kept in an opt-in profile rather than bound to the
+                 default lifecycle: it needs to reach the network on first use, and the ordinary
+                 `mvn verify` in this repo is run offline. CI runs `mvn -Psbom package` so a
+                 published artifact always has a matching SBOM beside it.
+
+                 The OWASP dependency-check plugin is deliberately NOT here. It wants the NVD feed —
+                 an API key and a database measured in hundreds of megabytes, refreshed on a
+                 schedule — which is an operational commitment rather than a plugin declaration, and
+                 Dependabot already covers the "a dependency has a known advisory" case for a
+                 repository hosted on GitHub. Add it when there is somewhere to keep the database. -->
+            <id>sbom</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.cyclonedx</groupId>
+                        <artifactId>cyclonedx-maven-plugin</artifactId>
+                        <version>2.9.1</version>
+                        <executions>
+                            <execution>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>makeAggregateBom</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                        <configuration>
+                            <outputName>lws-server-sbom</outputName>
+                            <includeTestScope>false</includeTestScope>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

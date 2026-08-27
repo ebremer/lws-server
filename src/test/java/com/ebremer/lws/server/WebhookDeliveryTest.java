@@ -27,6 +27,7 @@ import org.eclipse.jetty.server.Server;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import com.ebremer.lws.server.tools.DidKeyTool;
 
 /**
  * Integration test for the full webhook-notification path: a subscription + a resource change
@@ -38,6 +39,13 @@ import org.junit.jupiter.api.Test;
  */
 class WebhookDeliveryTest {
 
+    /**
+     * This class's data directory. Deleted on the way out where the platform allows it, and by the
+     * next run's sweep where it does not — see {@link TestDirs}. It used to be a bare
+     * {@code createTempDirectory} that nothing ever removed, and the leak once filled a disk.
+     */
+    private static final Path tempDir = TestDirs.create();
+
     private record Received(String method, String contentType, String contentDigest,
             String signatureInput, String signature, byte[] body) {
     }
@@ -48,6 +56,7 @@ class WebhookDeliveryTest {
     private static int inboxPort;
     private static String baseUrl;
     private static HttpClient http;
+    private static String subscriberToken;
 
     private static final CountDownLatch delivered = new CountDownLatch(1);
     private static final AtomicReference<Received> received = new AtomicReference<>();
@@ -72,14 +81,21 @@ class WebhookDeliveryTest {
         });
         inbox.start();
 
-        // LWS server (open mode so anonymous can subscribe + create)
+        // LWS server (open mode so anonymous can create resources)
         int port = freePort();
         baseUrl = "http://localhost:" + port;
+        subscriberToken = DidKeyTool.mint(null, 3600, baseUrl).token();
         Properties p = new Properties();
         p.setProperty("lws.base-uri", baseUrl);
-        p.setProperty("lws.data-dir", Files.createTempDirectory("lws-webhook").toString());
+        // Open mode: this class asserts protocol behaviour, not authorization outcomes,
+        // so it opts in to the development posture rather than configuring an owner.
+        p.setProperty("lws.dev.open", "true");
+        p.setProperty("lws.data-dir", tempDir.toString());
         p.setProperty("lws.webhook.max-attempts", "1");
         p.setProperty("lws.subscription.purge-interval-seconds", "0");
+        // The inbox is on loopback, which the delivery policy blocks by default as an SSRF target.
+        // Allowing it explicitly is what an operator would do to notify an internal endpoint.
+        p.setProperty("lws.webhook.allowed-hosts", "localhost");
         LwsConfiguration config = LwsConfiguration.of(p);
         components = LwsComponents.create(config);
         lws = new Server(port);
@@ -108,6 +124,7 @@ class WebhookDeliveryTest {
                 + " \"inbox\":\"http://localhost:" + inboxPort + "/inbox\" }";
         HttpResponse<String> sub = http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/.lws/subscriptions"))
                 .header("Content-Type", "application/ld+json")
+                .header("Authorization", "Bearer " + subscriberToken)
                 .POST(HttpRequest.BodyPublishers.ofString(subscription)).build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(201, sub.statusCode());
@@ -164,6 +181,85 @@ class WebhookDeliveryTest {
             String x = reader.readObject().getJsonArray("keys").getJsonObject(0).getString("x");
             return Base64.getUrlDecoder().decode(x);
         }
+    }
+
+    /**
+     * The inbox URL is client-supplied, so it is checked against the delivery policy at creation
+     * time. Only {@code localhost} is allow-listed here; {@code 127.0.0.1} resolves to loopback and
+     * is not, so it is refused — the same check that stops an inbox aimed at a cloud-metadata or
+     * internal address.
+     */
+    @Test
+    void refusesAnInboxTheDeliveryPolicyBlocks() throws Exception {
+        String subscription = "{ \"type\":\"WebhookSubscription\", \"topic\":[\"" + baseUrl + "/\"],"
+                + " \"inbox\":\"http://127.0.0.1:" + inboxPort + "/inbox\" }";
+        HttpResponse<String> sub = http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/.lws/subscriptions"))
+                .header("Content-Type", "application/ld+json")
+                .header("Authorization", "Bearer " + subscriberToken)
+                .POST(HttpRequest.BodyPublishers.ofString(subscription)).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, sub.statusCode(), sub.body());
+    }
+
+    /** An unauthenticated subscriber cannot be quota-limited or manage what it created. */
+    @Test
+    void refusesAnonymousSubscriptionCreation() throws Exception {
+        String subscription = "{ \"type\":\"WebhookSubscription\", \"topic\":[\"" + baseUrl + "/\"],"
+                + " \"inbox\":\"http://localhost:" + inboxPort + "/inbox\" }";
+        HttpResponse<String> sub = http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/.lws/subscriptions"))
+                .header("Content-Type", "application/ld+json")
+                .POST(HttpRequest.BodyPublishers.ofString(subscription)).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(401, sub.statusCode(), sub.body());
+    }
+
+    /**
+     * Finding M37. This endpoint accepts a body before it has authorized anything, so it has to say
+     * what it will accept up front rather than discover it in the parser.
+     */
+    @Test
+    void refusesASubscriptionBodyThatDoesNotDeclareJson() throws Exception {
+        String subscription = "{ \"type\":\"WebhookSubscription\", \"topic\":[\"" + baseUrl + "/\"],"
+                + " \"inbox\":\"http://localhost:" + inboxPort + "/inbox\" }";
+        HttpResponse<String> sub = http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/.lws/subscriptions"))
+                .header("Authorization", "Bearer " + subscriberToken)
+                .header("Content-Type", "text/plain")
+                .POST(HttpRequest.BodyPublishers.ofString(subscription)).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(415, sub.statusCode(), sub.body());
+    }
+
+    /**
+     * Finding M37. Every topic costs a read transaction at creation and a walk per resource event
+     * afterwards, so the list an anonymous-capable endpoint accepts has to be bounded.
+     */
+    @Test
+    void refusesASubscriptionDeclaringMoreTopicsThanAllowed() throws Exception {
+        StringBuilder topics = new StringBuilder();
+        for (int i = 0; i < 200; i++) {
+            topics.append(i == 0 ? "" : ",").append('"').append(baseUrl).append("/t").append(i).append('"');
+        }
+        String subscription = "{ \"type\":\"WebhookSubscription\", \"topic\":[" + topics + "],"
+                + " \"inbox\":\"http://localhost:" + inboxPort + "/inbox\" }";
+        HttpResponse<String> sub = http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/.lws/subscriptions"))
+                .header("Authorization", "Bearer " + subscriberToken)
+                .header("Content-Type", "application/ld+json")
+                .POST(HttpRequest.BodyPublishers.ofString(subscription)).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, sub.statusCode(), sub.body());
+    }
+
+    /** Finding M17: a deeply nested body must not take the request thread down with an Error. */
+    @Test
+    void refusesADeeplyNestedSubscriptionBody() throws Exception {
+        String deep = "[".repeat(4000) + "]".repeat(4000);
+        HttpResponse<String> sub = http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/.lws/subscriptions"))
+                .header("Authorization", "Bearer " + subscriberToken)
+                .header("Content-Type", "application/ld+json")
+                .POST(HttpRequest.BodyPublishers.ofString(deep)).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, sub.statusCode(), sub.body());
+        assertTrue(sub.body().contains("nested deeper than"), sub.body());
     }
 
     private static byte[] sha256(byte[] data) throws Exception {

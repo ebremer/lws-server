@@ -17,6 +17,7 @@ import org.eclipse.jetty.server.Server;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import com.ebremer.lws.server.tools.DidKeyTool;
 
 /**
  * End-to-end integration tests: boots the real bare-Jetty stack ({@link JettyLauncher#buildHandler}
@@ -28,6 +29,13 @@ import org.junit.jupiter.api.Test;
  */
 class EndToEndTest {
 
+    /**
+     * This class's data directory. Deleted on the way out where the platform allows it, and by the
+     * next run's sweep where it does not — see {@link TestDirs}. It used to be a bare
+     * {@code createTempDirectory} that nothing ever removed, and the leak once filled a disk.
+     */
+    private static final Path tempDir = TestDirs.create();
+
     private static Server server;
     private static LwsComponents components;
     private static String baseUrl;
@@ -36,12 +44,17 @@ class EndToEndTest {
     @BeforeAll
     static void start() throws Exception {
         int port = freePort();
-        Path dataDir = Files.createTempDirectory("lws-it");
+        Path dataDir = tempDir;
         Properties p = new Properties();
         p.setProperty("lws.base-uri", "http://localhost:" + port);
+        // Open mode: this class asserts protocol behaviour, not authorization outcomes,
+        // so it opts in to the development posture rather than configuring an owner.
+        p.setProperty("lws.dev.open", "true");
         p.setProperty("lws.data-dir", dataDir.toString());
         p.setProperty("lws.webhook.max-attempts", "1");           // fail webhook delivery fast
         p.setProperty("lws.subscription.purge-interval-seconds", "0"); // no background purge during the test
+        p.setProperty("lws.webhook.allowed-hosts", "localhost");  // the test inbox is on loopback
+        p.setProperty("lws.max-request-bytes", "4096");           // small, so the 413 path is testable
         LwsConfiguration config = LwsConfiguration.of(p);
         components = LwsComponents.create(config);
         server = new Server(port);
@@ -114,8 +127,12 @@ class EndToEndTest {
 
         assertTrue(send("GET", "/box/", null, null, "Accept", "text/turtle").body().contains("/box/item"));
 
+        // PATCH names the version it changes, as PUT does (prior-review finding 14): a patch is a
+        // read-modify-write against a version the client has already read, and it was the one such
+        // method that accepted an unconditional request.
         assertEquals(204, send("PATCH", "/box/item", "application/sparql-update",
-                "INSERT DATA { <" + baseUrl + "/box/item#x> <http://schema.org/age> 42 }").statusCode());
+                "INSERT DATA { <" + baseUrl + "/box/item#x> <http://schema.org/age> 42 }",
+                "If-Match", etagOf("/box/item")).statusCode());
         assertTrue(send("GET", "/box/item", null, null, "Accept", "text/turtle").body().contains("42"));
 
         assertEquals(409, send("DELETE", "/box/", null, null).statusCode(), "non-empty container");
@@ -154,14 +171,139 @@ class EndToEndTest {
     void subscriptionLifecycle() throws Exception {
         String json = "{ \"type\":\"WebhookSubscription\", \"topic\":[\"" + baseUrl + "/\"],"
                 + " \"inbox\":\"http://localhost:1/inbox\" }";
-        HttpResponse<String> created = send("POST", "/.lws/subscriptions", "application/ld+json", json);
+        // Subscription creation requires an authenticated subscriber: an anonymous one could not be
+        // held to a quota, could not manage what it created, and could aim deliveries anywhere.
+        assertEquals(401, send("POST", "/.lws/subscriptions", "application/ld+json", json).statusCode(),
+                "anonymous subscription creation is refused by default");
+
+        String token = DidKeyTool.mint(null, 3600, baseUrl).token();
+        HttpResponse<String> created = send("POST", "/.lws/subscriptions", "application/ld+json", json,
+                "Authorization", "Bearer " + token);
         assertEquals(201, created.statusCode());
         String location = created.headers().firstValue("Location").orElse(null);
         assertNotNull(location);
 
-        assertTrue(send("GET", "/.lws/subscriptions", null, null, "Accept", "text/turtle").body().contains(location));
-        assertEquals(200, send("GET", path(location), null, null, "Accept", "text/turtle").statusCode());
-        assertEquals(204, send("DELETE", path(location), null, null).statusCode());
+        String auth = "Bearer " + token;
+        // The collection lists only the caller's own subscriptions, and an individual subscription
+        // is readable and deletable only by its subscriber (or a storage controller).
+        assertTrue(send("GET", "/.lws/subscriptions", null, null,
+                "Accept", "text/turtle", "Authorization", auth).body().contains(location));
+        HttpResponse<String> one = send("GET", path(location), null, null,
+                "Accept", "text/turtle", "Authorization", auth);
+        assertEquals(200, one.statusCode());
+        // Delivery bookkeeping is withheld: failureCount would report whether an arbitrary
+        // client-chosen inbox URL answered, making delivery a readable probe of our network.
+        assertFalse(one.body().contains("failureCount"),
+                "the subscription representation must not expose delivery failure counts");
+
+        assertEquals(204, send("DELETE", path(location), null, null, "Authorization", auth).statusCode());
+    }
+
+    /**
+     * Uploaded content is read back by other users on the storage's own origin — the same origin
+     * that serves the session-authenticated console — so active content must not simply render.
+     */
+    @Test
+    void uploadedActiveContentIsNeutralisedOnRead() throws Exception {
+        assertEquals(201, send("POST", "/", "text/html",
+                "<script>alert(1)</script>", "Slug", "pwn.html").statusCode());
+
+        HttpResponse<String> got = send("GET", "/pwn.html", null, null);
+        assertEquals(200, got.statusCode());
+        assertEquals("nosniff", got.headers().firstValue("X-Content-Type-Options").orElse(""));
+        assertTrue(got.headers().firstValue("Content-Security-Policy").orElse("").contains("sandbox"),
+                "a sandbox CSP should neuter it even if a client renders it");
+        assertTrue(got.headers().firstValue("Content-Disposition").orElse("").startsWith("attachment"),
+                "html must be sent as a download, not rendered inline");
+
+        // An inert type keeps rendering normally, but still gets the sniffing guard.
+        assertEquals(201, send("POST", "/", "image/png", "PNGDATA", "Slug", "ok.png").statusCode());
+        HttpResponse<String> png = send("GET", "/ok.png", null, null);
+        assertEquals("nosniff", png.headers().firstValue("X-Content-Type-Options").orElse(""));
+        assertTrue(png.headers().firstValue("Content-Disposition").isEmpty(),
+                "an inert media type is not forced to download");
+    }
+
+    /**
+     * A client-supplied JSON-LD body chooses its own {@code @context}; dereferencing it would let
+     * any writer aim the server's outbound requests at an address of their choosing.
+     */
+    @Test
+    void remoteJsonLdContextIsNotDereferenced() throws Exception {
+        String body = "{\"@context\":\"http://169.254.169.254/latest/meta-data/\","
+                + "\"@id\":\"http://example.org/thing\",\"http://schema.org/name\":\"x\"}";
+        HttpResponse<String> r = send("POST", "/", "application/ld+json", body, "Slug", "ctx");
+        assertEquals(400, r.statusCode(),
+                "a remote @context must be refused, not fetched");
+    }
+
+    /**
+     * The body is buffered whole before the write is authorized, so an unbounded read is reachable
+     * by an unauthenticated client. It must be refused on size, not on identity.
+     */
+    @Test
+    void oversizedRequestBodyIsRefused() throws Exception {
+        String tooBig = "x".repeat(5000); // over lws.max-request-bytes (4096)
+        assertEquals(413, send("POST", "/", "text/plain", tooBig, "Slug", "big").statusCode());
+        assertEquals(413, send("PUT", "/big2", "text/plain", tooBig).statusCode());
+        assertFalse(send("GET", "/", null, null, "Accept", "text/turtle").body().contains("/big2"),
+                "an over-sized write must not have been applied");
+
+        // Just under the limit still works.
+        assertEquals(201, send("POST", "/", "text/plain", "y".repeat(1000), "Slug", "ok-size").statusCode());
+    }
+
+    /**
+     * A container's entity-tag must be the one its own preconditions are evaluated against, and it
+     * must move when its membership changes — otherwise conditional writes on containers are
+     * impossible (428 without a tag, 412 with the tag the server just issued).
+     */
+    @Test
+    void containerEtagTracksMembershipAndSatisfiesIfMatch() throws Exception {
+        assertEquals(201, send("PUT", "/etagbox/", null, null,
+                "Link", "<http://www.w3.org/ns/ldp#Container>; rel=\"type\"").statusCode());
+        String before = send("GET", "/etagbox/", null, null).headers().firstValue("ETag").orElseThrow();
+
+        assertEquals(201, send("POST", "/etagbox/", "text/turtle",
+                "<#a> <http://schema.org/name> \"a\" .", "Slug", "child").statusCode());
+        String after = send("GET", "/etagbox/", null, null).headers().firstValue("ETag").orElseThrow();
+        assertFalse(before.equals(after), "adding a member must change the container's ETag");
+
+        // A stale tag is refused, and the tag the server just served is accepted.
+        assertEquals(204, send("DELETE", "/etagbox/child", null, null).statusCode());
+        String current = send("GET", "/etagbox/", null, null).headers().firstValue("ETag").orElseThrow();
+        assertEquals(412, send("DELETE", "/etagbox/", null, null, "If-Match", before).statusCode());
+        assertEquals(204, send("DELETE", "/etagbox/", null, null, "If-Match", current).statusCode());
+    }
+
+    /**
+     * Blob keys must not be derived from the resource path: IRIs are compared case-sensitively but
+     * NTFS and default APFS/HFS+ are not, so path-derived keys collapsed two distinct resources
+     * onto one file — writing one silently replaced the other's bytes.
+     */
+    @Test
+    void resourcesDifferingOnlyInCaseKeepSeparateBytes() throws Exception {
+        assertEquals(201, send("PUT", "/CaseTest", "application/octet-stream", "UPPER-CONTENT").statusCode());
+        assertEquals(201, send("PUT", "/casetest", "application/octet-stream", "lower-content").statusCode());
+
+        assertEquals("UPPER-CONTENT", send("GET", "/CaseTest", null, null).body());
+        assertEquals("lower-content", send("GET", "/casetest", null, null).body());
+
+        // Deleting one must not remove the other's bytes.
+        assertEquals(204, send("DELETE", "/casetest", null, null).statusCode());
+        assertEquals("UPPER-CONTENT", send("GET", "/CaseTest", null, null).body());
+    }
+
+    /** A data resource and a container of the same name used to collide into a permanent 500. */
+    @Test
+    void aDataResourceAndAContainerMaySharePrefixes() throws Exception {
+        assertEquals(201, send("PUT", "/collide", "application/octet-stream", "FILE").statusCode());
+        assertEquals(201, send("PUT", "/collide/", null, null,
+                "Link", "<http://www.w3.org/ns/ldp#Container>; rel=\"type\"").statusCode());
+        assertEquals(201, send("PUT", "/collide/inner", "application/octet-stream", "INNER").statusCode());
+
+        assertEquals("FILE", send("GET", "/collide", null, null).body());
+        assertEquals("INNER", send("GET", "/collide/inner", null, null).body());
     }
 
     @Test
@@ -171,7 +313,8 @@ class EndToEndTest {
         String resource = path(created.headers().firstValue("Location").orElseThrow());
 
         // RFC 7386: replace nothing for "a", remove "b" (null), add "c"
-        assertEquals(204, send("PATCH", resource, "application/merge-patch+json", "{\"b\":null,\"c\":3}").statusCode());
+        assertEquals(204, send("PATCH", resource, "application/merge-patch+json", "{\"b\":null,\"c\":3}",
+                "If-Match", etagOf(resource)).statusCode());
 
         HttpResponse<String> got = send("GET", resource, null, null);
         assertEquals(200, got.statusCode());
@@ -182,6 +325,8 @@ class EndToEndTest {
         assertTrue(got.headers().firstValue("Accept-Patch").orElse("").contains("merge-patch+json"));
 
         // merge-patch is rejected on a container (409) and on a non-JSON binary (415)
+        // Both are refused for what they are, not for a missing precondition: "this method cannot
+        // be applied here" is settled before the conditional rule (findings H21, L28).
         assertEquals(409, send("PATCH", "/", "application/merge-patch+json", "{\"x\":1}").statusCode());
         HttpResponse<String> png = send("POST", "/", "image/png", "PNG", "Slug", "blob");
         assertEquals(415, send("PATCH", path(png.headers().firstValue("Location").orElseThrow()),
@@ -197,7 +342,8 @@ class EndToEndTest {
         // RFC 6902: replace a, remove b, add c.
         assertEquals(204, send("PATCH", resource, "application/json-patch+json",
                 "[{\"op\":\"replace\",\"path\":\"/a\",\"value\":9},{\"op\":\"remove\",\"path\":\"/b\"},"
-                        + "{\"op\":\"add\",\"path\":\"/c\",\"value\":3}]").statusCode());
+                        + "{\"op\":\"add\",\"path\":\"/c\",\"value\":3}]",
+                "If-Match", etagOf(resource)).statusCode());
 
         HttpResponse<String> got = send("GET", resource, null, null);
         assertEquals(200, got.statusCode());
@@ -208,7 +354,8 @@ class EndToEndTest {
 
         // A failed `test` op cannot be applied -> 409; JSON Patch is rejected on a container -> 409.
         assertEquals(409, send("PATCH", resource, "application/json-patch+json",
-                "[{\"op\":\"test\",\"path\":\"/a\",\"value\":1}]").statusCode());
+                "[{\"op\":\"test\",\"path\":\"/a\",\"value\":1}]",
+                "If-Match", etagOf(resource)).statusCode());
         assertEquals(409, send("PATCH", "/", "application/json-patch+json",
                 "[{\"op\":\"add\",\"path\":\"/x\",\"value\":1}]").statusCode());
     }
@@ -221,6 +368,11 @@ class EndToEndTest {
     }
 
     // ----- helpers -----
+
+    /** The current entity-tag of a resource, for a conditional write. */
+    private static String etagOf(String path) throws Exception {
+        return send("GET", path, null, null).headers().firstValue("ETag").orElseThrow();
+    }
 
     private static HttpResponse<String> send(String method, String path, String contentType, String body,
             String... headerPairs) throws Exception {

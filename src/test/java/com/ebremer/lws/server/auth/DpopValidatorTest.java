@@ -68,12 +68,72 @@ class DpopValidatorTest {
     }
 
     @Test
-    void rejectsReplayedJti() throws Exception {
+    void rejectsReplayedProof() throws Exception {
         ECKey key = ecKey();
         DpopValidator v = new DpopValidator();
         String proof = proof(key, "POST", HTU, "replay-jti", new Date(), ath(ACCESS_TOKEN));
-        assertTrue(v.verifyProof("POST", HTU, proof, ACCESS_TOKEN).isPresent()); // first use
-        assertTrue(v.verifyProof("POST", HTU, proof, ACCESS_TOKEN).isEmpty());   // replay
+        assertTrue(v.verifyProof("POST", HTU, proof, ACCESS_TOKEN).isPresent());
+        assertTrue(v.claimProof(proof), "first use of the proof");
+        assertFalse(v.claimProof(proof), "replay of the same proof");
+    }
+
+    /**
+     * The replay cache must not be writable by a caller who has not presented a valid access token
+     * (finding M6).
+     *
+     * <p>Everything {@link DpopValidator#verifyProof} checks can be satisfied by an unauthenticated
+     * client on its own: the proof embeds the public key its signature is made with, and {@code ath}
+     * only has to match the SHA-256 of whatever string is sent as the access token — which need not
+     * be a token at all. When the {@code jti} was consumed there, each such request wrote an entry
+     * into a cache bounded at {@code lws.dpop.jti-cache-size}, and a full cache evicts entries that
+     * have <em>not</em> expired, re-enabling the replay the guard exists to stop.
+     *
+     * <p>Against the pre-fix code the second {@code verifyProof} returns empty and this fails on its
+     * first assertion.
+     */
+    @Test
+    void verifyingAProofDoesNotConsumeIt() throws Exception {
+        ECKey key = ecKey();
+        DpopValidator v = new DpopValidator();
+        String proof = proof(key, "POST", HTU, "not-consumed", new Date(), ath(ACCESS_TOKEN));
+        for (int i = 0; i < 5; i++) {
+            assertTrue(v.verifyProof("POST", HTU, proof, ACCESS_TOKEN).isPresent(),
+                    "verification alone must not consume the proof (attempt " + i + ")");
+        }
+        assertTrue(v.claimProof(proof), "the proof is still unclaimed after repeated verification");
+        assertFalse(v.claimProof(proof));
+    }
+
+    /** A proof with no {@code jti} cannot be replay-protected, so it is refused outright. */
+    @Test
+    void rejectsProofWithoutJti() throws Exception {
+        ECKey key = ecKey();
+        String proof = proof(key, "POST", HTU, null, new Date(), ath(ACCESS_TOKEN));
+        assertTrue(new DpopValidator().verifyProof("POST", HTU, proof, ACCESS_TOKEN).isEmpty());
+    }
+
+    /**
+     * A cache full of unexpired entries is a reopened replay window, so it is counted and reported
+     * rather than left silent.
+     */
+    @Test
+    void sizeEvictionIsCounted() throws Exception {
+        DpopValidator v = new DpopValidator(300_000L, 60_000L, null, 1_000L);
+        // claimProof only parses; these need to be well-formed JWTs, not verifiable ones.
+        for (int i = 0; i < 5_000; i++) {
+            v.claimProof(parseableProofWithJti("evict-" + i));
+        }
+        // Caffeine's eviction is asynchronous; give the maintenance a moment to run.
+        for (int i = 0; i < 40 && v.sizeEvictions() == 0; i++) {
+            Thread.sleep(25);
+        }
+        assertTrue(v.sizeEvictions() > 0, "a cache capped at 1000 must evict when given 5000 proofs");
+    }
+
+    /** A syntactically valid (unverifiable) DPoP proof carrying only a {@code jti}. */
+    private static String parseableProofWithJti(String jti) {
+        return Base64URL.encode("{\"alg\":\"ES256\",\"typ\":\"dpop+jwt\"}") + "."
+                + Base64URL.encode("{\"jti\":\"" + jti + "\"}") + ".AAAA";
     }
 
     @Test

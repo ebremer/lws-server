@@ -57,15 +57,18 @@ Desktop.ini
 # ── LWS runtime & local config ───────────────────────────────────────
 # Server state: TDB2 dataset, binary blobs, webhook signing keys.
 lws-data/
-# Local runtime configuration may contain owner WebIDs / OIDC secrets.
-/lws.properties
-# Transient smoke-test artifacts.
-*.err
-cp.txt
-note.ttl
-patch.rq
-sub.json
-locked.acl.ttl
+# Local runtime configuration may contain owner WebIDs and lws.oidc.client-secret.
+# Unanchored on purpose: the root-anchored form left src/main/resources/lws.properties — which is
+# ON THE CLASSPATH of the shipped jar — perfectly committable.
+lws.properties
+# Transient smoke-test artifacts, anchored to the root so they cannot silently swallow a future
+# src/test/resources fixture that happens to share a name.
+/*.err
+/cp.txt
+/note.ttl
+/patch.rq
+/sub.json
+/locked.acl.ttl
 
 # ── Logs & local environment ─────────────────────────────────────────
 *.log

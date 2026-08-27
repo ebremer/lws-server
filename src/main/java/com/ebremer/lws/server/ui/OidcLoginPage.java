@@ -43,8 +43,19 @@ public final class OidcLoginPage extends BasePage {
         }
         UserProfile up = profile.get();
         Object issuer = up.getAttribute("iss");
-        LwsSession.get().signIn(new LwsPrincipal(up.getId(),
-                issuer == null ? null : issuer.toString(), app().config().oidcClientId()));
+        String iss = issuer == null ? null : issuer.toString();
+        // pac4j has verified the ID token's signature, issuer, expiry, nonce and audience — but not
+        // that this subject claims this issuer, which is the LWS suite's actual trust step and what
+        // the token form on the login page gets from app().validator(). Without it the console
+        // would be a second OpenID door with a weaker guarantee than the API's, and the default one.
+        if (!app().validator().openIdSubjectTrustsIssuer(up.getId(), iss)) {
+            profileManager.removeProfiles();
+            getSession().error("Signed in with " + (iss == null ? "the provider" : iss)
+                    + ", but " + up.getId() + " does not name it as its OpenID provider.");
+            setResponsePage(LoginPage.class);
+            return;
+        }
+        LwsSession.get().signIn(new LwsPrincipal(up.getId(), iss, app().config().oidcClientId()));
         profileManager.removeProfiles(); // identity now lives in the Wicket session
         getSession().success("Signed in as " + up.getId());
         setResponsePage(BrowsePage.class);

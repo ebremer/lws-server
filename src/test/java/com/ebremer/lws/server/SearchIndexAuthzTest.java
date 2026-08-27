@@ -12,6 +12,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
@@ -36,6 +37,13 @@ import com.ebremer.lws.server.tools.DidKeyTool;
  */
 class SearchIndexAuthzTest {
 
+    /**
+     * This class's data directory. Deleted on the way out where the platform allows it, and by the
+     * next run's sweep where it does not — see {@link TestDirs}. It used to be a bare
+     * {@code createTempDirectory} that nothing ever removed, and the leak once filled a disk.
+     */
+    private static final Path tempDir = TestDirs.create();
+
     private static final String SECRET = "https://schema.org/Secret";
     private static final String INDEX = "/.lws/type-index";
     private static final String SEARCH = "/.lws/type-search";
@@ -48,14 +56,16 @@ class SearchIndexAuthzTest {
 
     @BeforeAll
     static void start() throws Exception {
-        DidKeyTool.Minted owner = DidKeyTool.mint(null, 3600, null);
-        ownerToken = owner.token();
-
         int port = freePort();
         baseUrl = "http://localhost:" + port;
+
+        // Minted for this storage: credentials carry an `aud` naming it (see AudiencePolicy).
+        DidKeyTool.Minted owner = DidKeyTool.mint(null, 3600, baseUrl);
+        ownerToken = owner.token();
+
         Properties p = new Properties();
         p.setProperty("lws.base-uri", baseUrl);
-        p.setProperty("lws.data-dir", Files.createTempDirectory("lws-search-authz").toString());
+        p.setProperty("lws.data-dir", tempDir.toString());
         p.setProperty("lws.owners", owner.did());
         p.setProperty("lws.public-read", "false");       // resources private unless owner-read
         p.setProperty("lws.search-index.page-size", "2"); // force multi-page results

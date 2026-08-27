@@ -4,6 +4,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Base64;
+import java.util.Locale;
 
 /**
  * Produces RFC 9421 HTTP Message Signatures (and the RFC 9530 {@code Content-Digest}) for
@@ -32,10 +33,7 @@ public final class HttpMessageSignatures {
         String params = COMPONENTS + ";created=" + createdEpochSeconds
                 + ";keyid=\"" + keys.keyId() + "\";alg=\"ed25519\"";
 
-        String authority = target.getHost() == null ? "" : target.getHost().toLowerCase();
-        if (target.getPort() != -1) {
-            authority = authority + ":" + target.getPort();
-        }
+        String authority = authorityOf(target);
         String path = (target.getRawPath() == null || target.getRawPath().isEmpty()) ? "/" : target.getRawPath();
         String scheme = target.getScheme() == null ? "https" : target.getScheme().toLowerCase();
 
@@ -52,6 +50,36 @@ public final class HttpMessageSignatures {
         String signatureInput = LABEL + "=" + params;
         String signature = LABEL + "=:" + base64(sig) + ":";
         return new SignatureHeaders(contentDigest, signatureInput, signature);
+    }
+
+    /**
+     * The normalized authority a verifier will reconstruct, per RFC 9421 &sect;2.2.3.
+     *
+     * <p>{@code URI.getPort()} returns the port as <em>written</em>, so an inbox recorded as
+     * {@code https://host:443/hook} was signed over {@code host:443} while the wire {@code Host}
+     * header carries {@code host} — RFC 3986 &sect;6.2.3 makes a scheme's default port equivalent to
+     * no port at all, and a client does not send it. A conformant verifier therefore rebuilt a
+     * different base and rejected <em>every</em> delivery to that inbox as forged (finding M35).
+     * Nothing on this side noticed: the rejection came back as a 4xx from the subscriber, was
+     * retried, and eventually deactivated the subscription — a correct subscriber presenting as a
+     * broken one.
+     */
+    private static String authorityOf(URI target) {
+        String host = target.getHost() == null ? "" : target.getHost().toLowerCase(Locale.ROOT);
+        int port = target.getPort();
+        String scheme = target.getScheme() == null ? "" : target.getScheme().toLowerCase(Locale.ROOT);
+        if (port == -1 || port == defaultPortFor(scheme)) {
+            return host;
+        }
+        return host + ":" + port;
+    }
+
+    private static int defaultPortFor(String scheme) {
+        return switch (scheme) {
+            case "https" -> 443;
+            case "http" -> 80;
+            default -> -1;
+        };
     }
 
     private static byte[] sha256(byte[] data) {

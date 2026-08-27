@@ -49,8 +49,36 @@ public final class Iris {
         return "/".equals(path);
     }
 
+    /**
+     * The reserved suffix identifying a resource's access-control resource.
+     *
+     * <p>It lives here rather than in the Web Access Control engine because it is a fact about the
+     * IRI space, not about authorization: the router diverts these paths and the create path must
+     * refuse them, in both authorization modes and whether or not WAC is even wired up.
+     */
+    public static final String ACL_SUFFIX = ".acl";
+
     /** The reserved suffix identifying a resource's linkset (metadata) resource. */
     public static final String LINKSET_SUFFIX = ".meta";
+
+    public static boolean isAclPath(String path) {
+        return path.endsWith(ACL_SUFFIX);
+    }
+
+    /**
+     * True if the final segment of {@code path} is reserved for a resource's ACL or linkset.
+     *
+     * <p>The trailing slash is stripped first, so a <em>container</em> named {@code .acl} is
+     * reserved too. The router does not divert that form today, but {@code Slug: .acl/} reaches it
+     * in one header and it sits one path normalization away from a name that matters — this guard
+     * must be a superset of what the router hides, never a subset. Matching is case-insensitive for
+     * the same reason: {@code .ACL} is not diverted today, and over-reserving is free while
+     * under-reserving is the bug.
+     */
+    public static boolean hasReservedSuffix(String path) {
+        String segment = stripTrailingSlash(path).toLowerCase(Locale.ROOT);
+        return segment.endsWith(ACL_SUFFIX) || segment.endsWith(LINKSET_SUFFIX);
+    }
 
     /** The linkset (metadata) resource IRI/path for a resource, e.g. {@code /a/b} -> {@code /a/b.meta}. */
     public static String linkset(String iriOrPath) {
@@ -124,18 +152,25 @@ public final class Iris {
     }
 
     /**
-     * Map a server-relative path to a safe binary-store key (no leading slash, no traversal).
+     * Mint a fresh, opaque binary-store key, unrelated to any resource IRI.
      *
-     * @throws LwsException 400 if the path attempts directory traversal.
+     * <p>Keys used to be the request path itself, which made the blob store a second namespace
+     * addressed by client-chosen names. That is unsafe in two ways. Resource IRIs are compared
+     * case-sensitively, but NTFS and default APFS/HFS+ are not, so {@code /c/Secret} and
+     * {@code /c/secret} — two resources with independent owners and ACLs — resolved to the
+     * <em>same file</em>: writing one silently replaced the other's bytes while its metadata still
+     * described the old content. And a data resource at {@code /a} needs a file where a resource at
+     * {@code /a/b} needs a directory, so the pair collided into a permanent 500.
+     *
+     * <p>An opaque key also makes commit-ordered writes possible: a new version goes to a key no
+     * reader can reach yet, so the live bytes are only retired once the metadata naming them has
+     * committed. The key is stored per resource in {@code lws:binaryKey}, so existing path-derived
+     * keys keep resolving and are retired naturally as their resources are rewritten.
      */
-    public static String binaryKey(String path) {
-        String p = path.startsWith("/") ? path.substring(1) : path;
-        for (String seg : p.split("/")) {
-            if (seg.equals("..")) {
-                throw LwsException.badRequest("Illegal path segment");
-            }
-        }
-        return p;
+    public static String newBinaryKey() {
+        String hex = java.util.UUID.randomUUID().toString().replace("-", "");
+        // Two levels of fan-out keep directory sizes reasonable on large stores.
+        return hex.substring(0, 2) + "/" + hex.substring(2, 4) + "/" + hex;
     }
 
     public static String stripTrailingSlash(String s) {
