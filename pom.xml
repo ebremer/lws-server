@@ -46,7 +46,7 @@
         <pac4j.version>6.1.2</pac4j.version>
         <jakartaee-pac4j.version>8.0.1</jakartaee-pac4j.version>
         <oauth-oidc-sdk.version>11.23.1</oauth-oidc-sdk.version>
-        <wicket.version>10.8.0</wicket.version>
+        <wicket.version>10.10.0</wicket.version>
         <acme4j.version>5.1.0</acme4j.version>
     </properties>
 
