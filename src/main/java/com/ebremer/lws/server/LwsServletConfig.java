@@ -1,6 +1,7 @@
 package com.ebremer.lws.server;
 
 import jakarta.servlet.Filter;
+import jakarta.servlet.http.HttpServlet;
 import org.apache.wicket.protocol.http.WicketFilter;
 import org.eclipse.jetty.server.ConnectionFactory;
 import org.eclipse.jetty.server.ForwardedRequestCustomizer;
@@ -24,6 +25,8 @@ import com.ebremer.lws.server.http.LwsResourceServlet;
 import com.ebremer.lws.server.http.SearchIndexServlet;
 import com.ebremer.lws.server.http.StorageDescriptionServlet;
 import com.ebremer.lws.server.http.SubscriptionServlet;
+import com.ebremer.lws.server.oauth.AuthorizationServerMetadataServlet;
+import com.ebremer.lws.server.oauth.TokenEndpointServlet;
 import com.ebremer.lws.server.tls.HstsFilter;
 import com.ebremer.lws.server.ui.LwsWebApplication;
 
@@ -92,7 +95,8 @@ public class LwsServletConfig {
     @Bean
     public ServletRegistrationBean<LwsResourceServlet> resourceServlet(LwsComponents c) {
         ServletRegistrationBean<LwsResourceServlet> bean = new ServletRegistrationBean<>(
-                new LwsResourceServlet(c.resourceService(), c.config(), c.aclService(), c.linksetService()), "/*");
+                new LwsResourceServlet(c.resourceService(), c.config(), c.aclService(), c.linksetService(),
+                        c.storageDescriptionResponder()), "/*");
         bean.setName("lwsResource");
         bean.setLoadOnStartup(1);
         return bean;
@@ -101,9 +105,36 @@ public class LwsServletConfig {
     @Bean
     public ServletRegistrationBean<StorageDescriptionServlet> storageDescriptionServlet(LwsComponents c) {
         ServletRegistrationBean<StorageDescriptionServlet> bean = new ServletRegistrationBean<>(
-                new StorageDescriptionServlet(c.storageDescriptionService(), c.config(), c.clock()),
+                new StorageDescriptionServlet(c.storageDescriptionResponder()),
                 c.config().storageDescriptionPath());
         bean.setName("lwsStorageDescription");
+        return bean;
+    }
+
+    /**
+     * The embedded authorization server's token endpoint (lws10-core, Token Exchange). When the
+     * server is off the registration is disabled, and holds a placeholder because Spring will not
+     * register a null servlet.
+     */
+    @Bean
+    public ServletRegistrationBean<HttpServlet> tokenEndpointServlet(LwsComponents c) {
+        HttpServlet servlet = c.tokenExchange() == null ? new HttpServlet() { }
+                : new TokenEndpointServlet(c.tokenExchange(), c.dpopValidator(), c.config());
+        ServletRegistrationBean<HttpServlet> bean = new ServletRegistrationBean<>(servlet, c.config().tokenPath());
+        bean.setName("lwsToken");
+        bean.setEnabled(c.tokenExchange() != null);
+        return bean;
+    }
+
+    /** The embedded authorization server's metadata at {@code /.well-known/lws-configuration}. */
+    @Bean
+    public ServletRegistrationBean<HttpServlet> authorizationServerMetadataServlet(LwsComponents c) {
+        HttpServlet servlet = c.tokenExchange() == null ? new HttpServlet() { }
+                : new AuthorizationServerMetadataServlet(c.config(), c.tokenExchange());
+        ServletRegistrationBean<HttpServlet> bean =
+                new ServletRegistrationBean<>(servlet, LwsConfiguration.AS_METADATA_PATH);
+        bean.setName("lwsAuthorizationServerMetadata");
+        bean.setEnabled(c.tokenExchange() != null);
         return bean;
     }
 
@@ -119,7 +150,7 @@ public class LwsServletConfig {
     @Bean
     public ServletRegistrationBean<JwksServlet> jwksServlet(LwsComponents c) {
         ServletRegistrationBean<JwksServlet> bean = new ServletRegistrationBean<>(
-                new JwksServlet(c.webhookKeys()), c.config().jwksPath());
+                new JwksServlet(c.jwkSetJson()), c.config().jwksPath());
         bean.setName("lwsJwks");
         return bean;
     }

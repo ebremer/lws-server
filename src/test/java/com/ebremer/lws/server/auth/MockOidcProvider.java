@@ -66,6 +66,17 @@ public final class MockOidcProvider implements AutoCloseable {
                         + "<http://xmlns.com/foaf/0.1/knows> <" + issuer + "/profile> .\n"
                         + "<" + issuer + "/profile> lws:service "
                         + "[ a lws:OpenIdProvider ; lws:serviceEndpoint <" + issuer + "> ] ."));
+        // The lws10-authn-openid example document itself: plain JSON with the CID v1 context, served
+        // as application/json — which the RDF reading of a subject document could not parse at all.
+        server.createContext("/profile-json", e -> respond(e, "application/json",
+                "{\"@context\":[\"https://www.w3.org/ns/cid/v1\"],\"id\":\"" + issuer + "/profile-json\","
+                        + "\"service\":[{\"type\":\"https://www.w3.org/ns/lws#OpenIdProvider\","
+                        + "\"serviceEndpoint\":\"" + issuer + "\"}]}"));
+        // The same shape naming another provider, which must not establish trust in this one.
+        server.createContext("/profile-json-elsewhere", e -> respond(e, "application/json",
+                "{\"@context\":[\"https://www.w3.org/ns/cid/v1\"],\"id\":\"" + issuer + "/profile-json-elsewhere\","
+                        + "\"service\":[{\"type\":\"https://www.w3.org/ns/lws#OpenIdProvider\","
+                        + "\"serviceEndpoint\":\"https://other-provider.example\"}]}"));
         // Controlled identifier document that does NOT advertise the provider.
         server.createContext("/untrusted", e -> respond(e, "text/turtle",
                 "@prefix lws: <https://www.w3.org/ns/lws#> .\n<" + issuer + "/untrusted> a lws:DataResource ."));
@@ -87,6 +98,16 @@ public final class MockOidcProvider implements AutoCloseable {
     /** A subject whose document uses the CID v1 shape ({@code did:service}/{@code did:serviceEndpoint}). */
     public String cidTrustedSubject() {
         return issuer + "/profile-cid";
+    }
+
+    /** A subject whose document is the lws10-authn-openid example: JSON, CID v1 context. */
+    public String jsonCidSubject() {
+        return issuer + "/profile-json";
+    }
+
+    /** A JSON CID subject that names a different OpenID provider. */
+    public String jsonCidSubjectOfAnotherProvider() {
+        return issuer + "/profile-json-elsewhere";
     }
 
     public String untrustedSubject() {

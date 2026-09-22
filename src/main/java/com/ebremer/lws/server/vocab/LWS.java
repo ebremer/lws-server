@@ -44,7 +44,19 @@ public final class LWS {
     // ----- Classes -----
     /** A Linked Web Storage instance. */
     public static final Resource Storage = r("Storage");
-    /** A resource that enumerates and describes a storage's root, services and capabilities. */
+    /**
+     * An HTTP resource that supports the LWS read operations: the superclass of {@link #Container}
+     * and {@link #DataResource}, and the access-grant target matcher that matches either.
+     */
+    public static final Resource StorageResource = r("StorageResource");
+    /** The service whose {@code serviceEndpoint} is a storage's root container. */
+    public static final Resource StorageRoot = r("StorageRoot");
+    /**
+     * No longer an LWS term. The storage description is now a controlled identifier document whose
+     * {@code id} is the storage itself; this server wrote the description's own type with this IRI
+     * until the drafts of 27 July 2026, and it is kept so stored or cached copies still parse.
+     */
+    @Deprecated
     public static final Resource StorageDescription = r("StorageDescription");
     /** A resource that contains other resources. */
     public static final Resource Container = r("Container");
@@ -81,10 +93,24 @@ public final class LWS {
     public static final Resource ContainerPage = r("ContainerPage");
 
     // ----- Properties -----
-    /** Links a resource to its storage description (also used as a Link relation). */
+    /**
+     * The link relation from any Storage Resource to the canonical URI of its storage, which
+     * dereferences to the storage description (lws10-core, Discovery and Binding).
+     */
+    public static final String REL_STORAGE = NS + "storage";
+    /**
+     * The relation this server used for the same purpose before the storage description became a
+     * controlled identifier document. Still refused as a client-managed linkset relation, so an old
+     * client cannot plant one that contradicts {@link #REL_STORAGE}.
+     */
+    @Deprecated
     public static final Property storageDescription = p("storageDescription");
     /** The list of resources contained in a container. */
     public static final Property items = p("items");
+    /** The number of resources in a container (or result set) the client may be told about. */
+    public static final Property totalItems = p("totalItems");
+    /** The preference URI for including or omitting link relations in a response (RFC 7240). */
+    public static final String PREFER_LINK_RELATIONS = NS + "PreferLinkRelations";
     /** A capability supported by the storage. */
     public static final Property capability = p("capability");
     /** A service associated with the storage. */

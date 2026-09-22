@@ -4,34 +4,64 @@ import java.text.ParseException;
 import java.util.Optional;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.ebremer.lws.server.core.LwsPrincipal;
 
 /**
- * Entry point for LWS authentication: routes a presented credential to the right authentication
- * suite by inspecting its shape, then returns the validated {@link LwsPrincipal}.
+ * Entry point for LWS authentication at the storage: routes a presented credential to what can
+ * validate it, by its shape, and returns the validated {@link LwsPrincipal}.
  *
  * <ul>
- *   <li>A signed JWT whose {@code sub} is a {@code did:key:} URI &rarr; did:key suite.</li>
- *   <li>A signed JWT whose {@code iss} equals its {@code sub} (self-issued) &rarr; SSI-CID suite.</li>
- *   <li>Any other signed JWT &rarr; OpenID Connect suite (external provider).</li>
- *   <li>A non-JWT credential (a SAML assertion, possibly base64-encoded) &rarr; SAML suite.</li>
+ *   <li>An <b>access token</b> — an RFC 9068 JWT ({@code typ: at+jwt}), or any JWT whose issuer is
+ *       an authorization server this storage trusts — goes to the {@link AccessTokenValidator}.
+ *       This is lws10-core's baseline: a client exchanges its authentication credential at an
+ *       authorization server and presents the access token it gets. Such a token is never
+ *       re-interpreted as an authentication credential if it fails.</li>
+ * </ul>
+ *
+ * <p>Presenting an <b>authentication credential directly</b> is this server's behaviour from before
+ * the baseline, kept as an additional mechanism (lws10-core: "A server MAY support additional
+ * authorization mechanisms") unless {@code lws.oauth.accept-authentication-credentials} turns it off:
+ *
+ * <ul>
+ *   <li>a self-issued JWT ({@code iss} equal to {@code sub}) &rarr; the self-signed controlled
+ *       identifier suite, which covers HTTPS, {@code did:key} and {@code did:web} subjects;</li>
+ *   <li>one whose subject is a {@code did:key} and that names no {@code kid} &rarr; the discontinued
+ *       did:key suite, kept deprecated for credentials minted before the self-signed CID suite
+ *       subsumed it (a CID credential must name the verification method it was signed with);</li>
+ *   <li>any other JWT &rarr; the OpenID Connect suite;</li>
+ *   <li>a non-JWT credential (a SAML assertion, possibly base64-encoded) &rarr; the SAML suite.</li>
  * </ul>
  *
  * @author Erich Bremer
  */
 public final class LwsCredentialValidator {
 
+    private static final Logger log = LoggerFactory.getLogger(LwsCredentialValidator.class);
+
     private final LwsOpenIdValidator openId;
     private final SsiCidValidator ssiCid;
     private final DidKeyValidator didKey;
     private final SamlValidator saml; // nullable: only when SAML trust is configured
+    private final AccessTokenValidator accessTokens; // nullable: no authorization server is trusted
+    private final boolean acceptCredentials;
 
+    /** Direct credentials only, and no access tokens: the pre-baseline behaviour, for tests and tools. */
     public LwsCredentialValidator(LwsOpenIdValidator openId, SsiCidValidator ssiCid,
             DidKeyValidator didKey, SamlValidator saml) {
+        this(openId, ssiCid, didKey, saml, null, true);
+    }
+
+    public LwsCredentialValidator(LwsOpenIdValidator openId, SsiCidValidator ssiCid,
+            DidKeyValidator didKey, SamlValidator saml, AccessTokenValidator accessTokens,
+            boolean acceptCredentials) {
         this.openId = openId;
         this.ssiCid = ssiCid;
         this.didKey = didKey;
         this.saml = saml;
+        this.accessTokens = accessTokens;
+        this.acceptCredentials = acceptCredentials;
     }
 
     /**
@@ -59,7 +89,15 @@ public final class LwsCredentialValidator {
             JWTClaimsSet claims = jwt.getJWTClaimsSet();
             String sub = claims.getSubject();
             String iss = claims.getIssuer();
-            if (sub != null && sub.startsWith(DidKey.PREFIX)) {
+            if (AccessTokenValidator.isAccessToken(jwt) || (accessTokens != null && accessTokens.trusts(iss))) {
+                return accessTokens == null ? Optional.empty() : accessTokens.validate(c);
+            }
+            if (!acceptCredentials) {
+                log.debug("an authentication credential was presented directly, which this storage does not accept");
+                return Optional.empty();
+            }
+            if (sub != null && sub.startsWith(DidKey.PREFIX) && jwt.getHeader().getKeyID() == null) {
+                log.debug("did:key credential without a kid: validated by the discontinued did:key suite");
                 return didKey.validate(c);
             }
             if (sub != null && sub.equals(iss)) {
@@ -67,7 +105,7 @@ public final class LwsCredentialValidator {
             }
             return openId.validate(c);
         } catch (ParseException notAJwt) {
-            return saml == null ? Optional.empty() : saml.validate(c);
+            return saml == null || !acceptCredentials ? Optional.empty() : saml.validate(c);
         }
     }
 }

@@ -20,9 +20,12 @@ import com.ebremer.lws.server.core.SecureFiles;
 
 /**
  * The server's Ed25519 signing key for outbound webhook notifications. The private seed is
- * persisted so the {@code keyid} (an RFC 7638 JWK thumbprint) is stable across restarts; the
- * public key is published as a JWK set at the JWKS endpoint for subscribers to verify
- * signatures.
+ * persisted so the key's identifier (an RFC 7638 JWK thumbprint) is stable across restarts.
+ *
+ * <p>The public key is published in the storage description, as a {@code JsonWebKey} verification
+ * method whose {@code id} is the storage URI with the thumbprint as its fragment — that {@code id}
+ * is the {@code keyid} a delivery's signature names (lws10-notifications-webhook) — and, as before,
+ * in the JWK set at the JWKS endpoint.
  *
  * @author Erich Bremer
  */
@@ -116,9 +119,19 @@ public final class WebhookKeys {
 
     /** The public verification key as a single-key JWK Set (JSON). */
     public String publicJwkSetJson() {
-        String x = b64url(publicKey.getEncoded());
-        return "{\"keys\":[{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"alg\":\"EdDSA\",\"use\":\"sig\",\"kid\":\""
-                + keyId + "\",\"x\":\"" + x + "\"}]}";
+        return "{\"keys\":[" + publicJwk() + "]}";
+    }
+
+    /** The public verification key as a JWK (RFC 8037), with its thumbprint as {@code kid}. */
+    public jakarta.json.JsonObject publicJwk() {
+        return jakarta.json.Json.createObjectBuilder()
+                .add("kty", "OKP")
+                .add("crv", "Ed25519")
+                .add("alg", "EdDSA")
+                .add("use", "sig")
+                .add("kid", keyId)
+                .add("x", b64url(publicKey.getEncoded()))
+                .build();
     }
 
     private static String thumbprint(byte[] publicKeyBytes) {

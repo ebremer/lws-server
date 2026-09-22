@@ -6,7 +6,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.List;
 import jakarta.json.Json;
-import jakarta.json.JsonArrayBuilder;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonValue;
 import jakarta.servlet.http.HttpServlet;
@@ -80,8 +79,11 @@ public final class AccessServlet extends HttpServlet {
                 }
                 case "GET", "HEAD" -> {
                     boolean body = req.getMethod().equals("GET");
+                    // Both endpoints are LWS containers and their entries data resources, so every
+                    // read of them links to the storage like any other Storage Resource.
+                    HttpSupport.addStorageLink(resp, config);
                     if (collection) {
-                        listCollection(resp, kind, principal, body);
+                        listCollection(req, resp, kind, principal, body);
                     } else {
                         getOne(resp, kind, principal, id, body);
                     }
@@ -145,27 +147,28 @@ public final class AccessServlet extends HttpServlet {
         writeJson(resp, record.json(), true);
     }
 
-    private void listCollection(HttpServletResponse resp, Kind kind, LwsPrincipal principal, boolean body)
-            throws IOException {
+    /**
+     * List the entries the caller may see, as an LWS container representation (lws10-core, Access
+     * Requests and Grants: "the access request and access grant endpoints are LWS containers").
+     * Each entry is a data resource — {@code type} {@code ["DataResource", "AccessGrant"]} or
+     * {@code ["DataResource", "AccessRequest"]}, {@code format} {@code application/lws+json} — and
+     * the listing is paginated at {@code lws.container.page-size} like any other container.
+     */
+    private void listCollection(HttpServletRequest req, HttpServletResponse resp, Kind kind,
+            LwsPrincipal principal, boolean body) throws IOException {
         boolean controller = isController(principal);
         String collectionIri = kind == Kind.REQUEST ? config.accessRequestsEndpointIri()
                 : config.accessGrantsEndpointIri();
         String type = kind == Kind.REQUEST ? "AccessRequest" : "AccessGrant";
-        JsonArrayBuilder items = Json.createArrayBuilder();
-        int count = 0;
+        List<JsonObject> members = new java.util.ArrayList<>();
         for (Record record : access.all(kind)) {
             if (controller || canView(principal, record)) {
-                items.add(Json.createObjectBuilder().add("id", record.id()).add("type", type));
-                count++;
+                members.add(LwsJsonContainers.member(record.id(), type));
             }
         }
-        JsonObject doc = Json.createObjectBuilder()
-                .add("@context", HttpSupport.LWS_JSON_CONTEXT)
-                .add("id", collectionIri)
-                .add("type", "Container")
-                .add("totalItems", count)
-                .add("items", items)
-                .build();
+        LwsJsonContainers.Page page = LwsJsonContainers.page(members,
+                LwsJsonContainers.requestedPage(req), config.containerPageSize());
+        JsonObject doc = LwsJsonContainers.document(resp, collectionIri, page);
         writeJson(resp, doc.toString(), body);
     }
 
@@ -215,13 +218,84 @@ public final class AccessServlet extends HttpServlet {
         return !LwsPrincipal.isAnonymous(principal) && principal.webId().equals(record.creator());
     }
 
-    /** A request/grant is viewable by its creator, and a grant additionally by its assignee. */
+    /**
+     * A request/grant is viewable by its creator, and a grant additionally by its assignee — through
+     * a client the grant allows. lws10-core's privacy considerations advise filtering a grant that
+     * carries a {@code client} constraint from responses to other clients: a grant usable only from
+     * one application should not tell a different application what it would have allowed.
+     */
     private static boolean canView(LwsPrincipal principal, Record record) {
         if (isCreator(principal, record)) {
             return true;
         }
         return record.kind() == Kind.GRANT && !LwsPrincipal.isAnonymous(principal)
-                && assignees(record.json()).contains(principal.webId());
+                && visibleToAssignee(record.json(), principal);
+    }
+
+    /**
+     * Whether some policy of the grant names {@code principal} as assignee and either has no
+     * {@code client} constraint or has one the principal's client satisfies.
+     */
+    private static boolean visibleToAssignee(String json, LwsPrincipal principal) {
+        try (var reader = Json.createReader(new StringReader(json))) {
+            JsonObject doc = reader.readObject();
+            JsonValue access = doc.get("access");
+            if (access == null || access.getValueType() != JsonValue.ValueType.ARRAY) {
+                return false;
+            }
+            for (JsonValue value : access.asJsonArray()) {
+                if (value.getValueType() != JsonValue.ValueType.OBJECT) {
+                    continue;
+                }
+                JsonObject policy = value.asJsonObject();
+                JsonValue assignee = policy.get("assignee");
+                if (assignee == null || assignee.getValueType() != JsonValue.ValueType.STRING
+                        || !((jakarta.json.JsonString) assignee).getString().equals(principal.webId())) {
+                    continue;
+                }
+                if (clientAllowed(policy, principal.clientId())) {
+                    return true;
+                }
+            }
+        } catch (RuntimeException | StackOverflowError ignored) {
+            // malformed stored document: nothing to show. The Error arm matters because a document
+            // deep enough to overflow the parser is not a RuntimeException.
+        }
+        return false;
+    }
+
+    /** True if the policy has no {@code client} constraint, or {@code clientId} satisfies each one. */
+    private static boolean clientAllowed(JsonObject policy, String clientId) {
+        JsonValue constraints = policy.get("constraint");
+        if (constraints == null || constraints.getValueType() != JsonValue.ValueType.ARRAY) {
+            return true;
+        }
+        for (JsonValue c : constraints.asJsonArray()) {
+            if (c.getValueType() != JsonValue.ValueType.OBJECT) {
+                continue;
+            }
+            JsonObject constraint = c.asJsonObject();
+            if (!"client".equals(constraint.getString("leftOperand", null))) {
+                continue;
+            }
+            if (clientId == null) {
+                return false;
+            }
+            JsonValue right = constraint.get("rightOperand");
+            boolean ok = switch (constraint.getString("operator", "")) {
+                case "eq" -> right != null && right.getValueType() == JsonValue.ValueType.STRING
+                        && clientId.equals(((jakarta.json.JsonString) right).getString());
+                case "isAnyOf" -> right != null && right.getValueType() == JsonValue.ValueType.ARRAY
+                        && right.asJsonArray().stream()
+                                .anyMatch(v -> v.getValueType() == JsonValue.ValueType.STRING
+                                        && clientId.equals(((jakarta.json.JsonString) v).getString()));
+                default -> false;
+            };
+            if (!ok) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static void denied(LwsPrincipal principal) {
@@ -229,27 +303,6 @@ public final class AccessServlet extends HttpServlet {
             throw LwsException.unauthorized("Authentication required");
         }
         throw LwsException.forbidden("Not authorized");
-    }
-
-    private static List<String> assignees(String json) {
-        List<String> out = new java.util.ArrayList<>();
-        try (var reader = Json.createReader(new StringReader(json))) {
-            JsonObject doc = reader.readObject();
-            if (doc.containsKey("access") && doc.get("access").getValueType() == JsonValue.ValueType.ARRAY) {
-                for (JsonValue policy : doc.getJsonArray("access")) {
-                    if (policy.getValueType() == JsonValue.ValueType.OBJECT) {
-                        JsonValue assignee = policy.asJsonObject().get("assignee");
-                        if (assignee != null && assignee.getValueType() == JsonValue.ValueType.STRING) {
-                            out.add(((jakarta.json.JsonString) assignee).getString());
-                        }
-                    }
-                }
-            }
-        } catch (RuntimeException | StackOverflowError ignored) {
-            // malformed stored document: no assignees. The Error arm matters because a document
-            // deep enough to overflow the parser is not a RuntimeException.
-        }
-        return out;
     }
 
     // ----- response helpers -----

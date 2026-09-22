@@ -65,12 +65,16 @@ public final class CorsFilter implements Filter {
      * challenge is unusable from a browser without it).
      */
     private static final String EXPOSED_HEADERS = String.join(", ",
-            "Accept-Patch", "Accept-Post", "Accept-Ranges", "Allow", "Content-Digest",
+            "Accept-Patch", "Accept-Post", "Accept-Query", "Accept-Ranges", "Allow", "Content-Digest",
             "Content-Range", "DPoP-Nonce", "ETag", "Link", "Location", "Preference-Applied",
             "Repr-Digest", "Vary", "Want-Content-Digest", "WWW-Authenticate");
 
-    /** Every method any LWS servlet implements. Fixed, so a preflight discloses nothing. */
-    private static final String ALLOWED_METHODS = "GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE";
+    /**
+     * Every method any LWS servlet implements. Fixed, so a preflight discloses nothing. QUERY is the
+     * Type Search Service's method (lws10-index, RFC 10008); a browser always preflights it, since
+     * it is not a CORS-safelisted method.
+     */
+    private static final String ALLOWED_METHODS = "GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE, QUERY";
 
     private final Set<String> allowedOrigins; // lower-cased; empty when anyOrigin
     private final boolean anyOrigin;

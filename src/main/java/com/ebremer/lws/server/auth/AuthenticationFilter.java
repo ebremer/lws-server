@@ -14,7 +14,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import com.ebremer.lws.server.LwsConfiguration;
 import com.ebremer.lws.server.core.LwsPrincipal;
 import com.ebremer.lws.server.core.RequestContext;
-import com.ebremer.lws.server.vocab.LWS;
+import com.ebremer.lws.server.http.HttpSupport;
 
 /**
  * Resource-server authentication filter. It reads the credential from the {@code Authorization}
@@ -229,20 +229,22 @@ public final class AuthenticationFilter implements Filter {
     /** Challenge the client to repeat the request with a server-issued nonce (RFC 9449 §8). */
     private void dpopNonceChallenge(HttpServletResponse response) throws IOException {
         response.setHeader("DPoP-Nonce", dpop.issueNonce());
-        response.setHeader("WWW-Authenticate", "DPoP realm=\"lws\", error=\"use_dpop_nonce\", "
-                + "error_description=\"a nonce is required in the DPoP proof\"");
-        response.addHeader("Link",
-                "<" + config.storageDescriptionIri() + ">; rel=\"" + LWS.storageDescription.getURI() + "\"");
+        response.setHeader("WWW-Authenticate", HttpSupport.challenge("DPoP", config, "use_dpop_nonce",
+                "a nonce is required in the DPoP proof"));
+        HttpSupport.addStorageLink(response, config);
         response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "use_dpop_nonce");
     }
 
+    /**
+     * Refuse a presented credential with {@code 401}: an {@code invalid_token} challenge in the
+     * lws10-core shape — naming the authorization server to get a token from, and the storage as
+     * realm — and the link to the storage, so the client can recover without a hardcoded URI.
+     */
     private void unauthorized(HttpServletResponse response, String scheme, String description)
             throws IOException {
         response.setHeader("WWW-Authenticate",
-                scheme + " realm=\"lws\", error=\"invalid_token\", error_description=\"" + description + "\"");
-        // Point clients at the storage description so they can discover how to authenticate.
-        response.addHeader("Link",
-                "<" + config.storageDescriptionIri() + ">; rel=\"" + LWS.storageDescription.getURI() + "\"");
+                HttpSupport.challenge(scheme, config, "invalid_token", description));
+        HttpSupport.addStorageLink(response, config);
         response.sendError(HttpServletResponse.SC_UNAUTHORIZED, description);
     }
 

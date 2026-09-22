@@ -162,6 +162,15 @@ public final class LwsOpenIdValidator {
         if (trustMissCache.getIfPresent(key) != null) {
             return false;
         }
+        // A controlled identifier document is JSON first (CID 1.0), and is usually served as such —
+        // application/json, application/cid — where the RDF path below cannot even parse it. Read
+        // it as JSON when it is JSON; fall back to RDF for a document written in Turtle or another
+        // RDF syntax.
+        Boolean json = trustsAsJson(sub, iss);
+        if (json != null) {
+            (json ? trustCache : trustMissCache).put(key, Boolean.TRUE);
+            return json;
+        }
         Model cid = loader.loadRdf(sub);
         if (cid == null) {
             log.debug("Could not dereference subject document {}", sub);
@@ -203,6 +212,89 @@ public final class LwsOpenIdValidator {
             trustMissCache.put(key, Boolean.TRUE);
         }
         return trusted;
+    }
+
+    /**
+     * The subject-trusts-issuer check over the document read as JSON: the topmost map's {@code id}
+     * must be the subject, and one of <em>its</em> {@code service} entries must have type
+     * {@code https://www.w3.org/ns/lws#OpenIdProvider} and {@code serviceEndpoint} equal to the
+     * issuer — the lws10-authn-openid rule, on the document shape the suite's own example uses.
+     *
+     * @return the answer, or {@code null} when the document is not JSON (so the RDF check decides)
+     */
+    private Boolean trustsAsJson(String sub, String iss) {
+        String text = loader.load(sub);
+        if (text == null) {
+            return null;
+        }
+        jakarta.json.JsonObject doc;
+        try {
+            com.ebremer.lws.server.core.JsonLimits.requireBoundedNesting(text,
+                    com.ebremer.lws.server.core.JsonLimits.MAX_NESTING_DEPTH);
+            try (jakarta.json.JsonReader reader = jakarta.json.Json.createReader(new java.io.StringReader(text))) {
+                doc = reader.readObject();
+            }
+        } catch (RuntimeException | StackOverflowError notJson) {
+            return null;
+        }
+        if (!sub.equals(doc.getString("id", null))) {
+            log.debug("Subject document id does not equal the subject {}", sub);
+            return false;
+        }
+        boolean lwsContext = doc.containsKey("@context") && doc.get("@context").toString()
+                .contains(com.ebremer.lws.server.vocab.LWS.JSON_CONTEXT);
+        jakarta.json.JsonValue services = doc.get("service");
+        if (services == null) {
+            return false;
+        }
+        java.util.List<jakarta.json.JsonValue> entries = services.getValueType() == jakarta.json.JsonValue.ValueType.ARRAY
+                ? services.asJsonArray() : java.util.List.of(services);
+        for (jakarta.json.JsonValue entry : entries) {
+            if (entry.getValueType() != jakarta.json.JsonValue.ValueType.OBJECT) {
+                continue;
+            }
+            jakarta.json.JsonObject service = entry.asJsonObject();
+            if (isOpenIdProvider(service.get("type"), lwsContext) && endpointIs(service.get("serviceEndpoint"), iss)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isOpenIdProvider(jakarta.json.JsonValue type, boolean lwsContext) {
+        if (type == null) {
+            return false;
+        }
+        java.util.List<jakarta.json.JsonValue> values = type.getValueType() == jakarta.json.JsonValue.ValueType.ARRAY
+                ? type.asJsonArray() : java.util.List.of(type);
+        for (jakarta.json.JsonValue v : values) {
+            if (v.getValueType() != jakarta.json.JsonValue.ValueType.STRING) {
+                continue;
+            }
+            String t = ((jakarta.json.JsonString) v).getString();
+            if (t.equals(LWS.OpenIdProvider.getURI()) || (lwsContext && t.equals("OpenIdProvider"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean endpointIs(jakarta.json.JsonValue endpoint, String iss) {
+        if (endpoint == null) {
+            return false;
+        }
+        if (endpoint.getValueType() == jakarta.json.JsonValue.ValueType.STRING) {
+            return iss.equals(((jakarta.json.JsonString) endpoint).getString());
+        }
+        if (endpoint.getValueType() == jakarta.json.JsonValue.ValueType.ARRAY) {
+            for (jakarta.json.JsonValue v : endpoint.asJsonArray()) {
+                if (v.getValueType() == jakarta.json.JsonValue.ValueType.STRING
+                        && iss.equals(((jakarta.json.JsonString) v).getString())) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**

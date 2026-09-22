@@ -79,7 +79,11 @@ class DpopHttpIntegrationTest {
     private static final String FIXTURE = "<#it> <http://schema.org/name> \"" + FIXTURE_NAME + "\" .";
     private static final String DOC = "/dpop-doc";
 
-    private static final String STORAGE_DESCRIPTION_REL = "https://www.w3.org/ns/lws#storageDescription";
+    /** The link relation from a Storage Resource — or a refusal — to its storage (lws10-core). */
+    private static final String STORAGE_REL = "https://www.w3.org/ns/lws#storage";
+
+    /** The proof algorithms a DPoP challenge lists (RFC 9449 §7.1). */
+    private static final String DPOP_ALGS = "ES256 ES384 ES512 EdDSA RS256 RS384 RS512 PS256 PS384 PS512";
 
     private static HttpClient http;
 
@@ -311,7 +315,7 @@ class DpopHttpIntegrationTest {
     void theSaml2SchemeDoesNotCarryAJwt() throws Exception {
         HttpResponse<String> r = withScheme("SAML2", setupToken);
         assertEquals(401, r.statusCode(), detail(r));
-        assertEquals("SAML2 realm=\"lws\", error=\"invalid_token\", "
+        assertEquals("SAML2 realm=\"" + baseUrl + "/\", error=\"invalid_token\", "
                 + "error_description=\"the SAML2 scheme carries a SAML assertion, not a JWT\"",
                 challenge(r));
     }
@@ -475,26 +479,35 @@ class DpopHttpIntegrationTest {
                 "a 401 must tell the client how to authenticate, but carried no WWW-Authenticate"));
     }
 
-    /** The challenge {@code AuthenticationFilter.unauthorized} builds for the DPoP scheme. */
+    /**
+     * The challenge {@code AuthenticationFilter.unauthorized} builds for the DPoP scheme: the
+     * lws10-core shape — the authorization server to get a token from ({@code as_uri}) and the
+     * storage as {@code realm} — plus the proof algorithms, the error and its description.
+     */
     private static String dpopChallenge(String description) {
-        return "DPoP realm=\"lws\", error=\"invalid_token\", error_description=\"" + description + "\"";
+        return dpopChallenge(baseUrl, "invalid_token", description);
     }
 
-    /** The challenge {@code AuthenticationFilter.dpopNonceChallenge} builds. */
+    private static String dpopChallenge(String base, String error, String description) {
+        return "DPoP as_uri=\"" + base + "\", realm=\"" + base + "/\", algs=\"" + DPOP_ALGS
+                + "\", error=\"" + error + "\", error_description=\"" + description + "\"";
+    }
+
+    /** The challenge {@code AuthenticationFilter.dpopNonceChallenge} builds, on the nonce server. */
     private static String nonceChallenge() {
-        return "DPoP realm=\"lws\", error=\"use_dpop_nonce\", "
-                + "error_description=\"a nonce is required in the DPoP proof\"";
+        return dpopChallenge(nonceBaseUrl, "use_dpop_nonce", "a nonce is required in the DPoP proof");
     }
 
     /**
-     * A refusal still has to be discoverable: the client is pointed at the storage description so it
-     * can find out how to authenticate. These headers are set before {@code sendError}, which is the
-     * part worth pinning — a servlet container that dropped them would leave the challenge unusable.
+     * A refusal still has to be discoverable: the client is pointed at the storage, whose URI
+     * dereferences to the storage description, so it can find out how to authenticate. These headers
+     * are set before {@code sendError}, which is the part worth pinning — a servlet container that
+     * dropped them would leave the challenge unusable.
      */
     private static void assertAdvertisesTheStorageDescription(HttpResponse<String> response) {
         assertTrue(response.headers().allValues("Link").stream()
-                        .anyMatch(l -> l.contains("rel=\"" + STORAGE_DESCRIPTION_REL + "\"")),
-                "a refused request must still advertise the storage description: "
+                        .anyMatch(l -> l.contains("rel=\"" + STORAGE_REL + "\"")),
+                "a refused request must still link to the storage: "
                         + response.headers().allValues("Link"));
     }
 

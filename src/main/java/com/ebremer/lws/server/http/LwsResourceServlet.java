@@ -51,13 +51,21 @@ public final class LwsResourceServlet extends HttpServlet {
     private final transient LwsConfiguration config;
     private final transient WacAclService aclService; // nullable: only when WAC is enabled
     private final transient LinksetService linksets;
+    // nullable: without it the storage URI answers only as the root container
+    private final transient StorageDescriptionResponder storageDescription;
 
     public LwsResourceServlet(ResourceService service, LwsConfiguration config, WacAclService aclService,
             LinksetService linksets) {
+        this(service, config, aclService, linksets, null);
+    }
+
+    public LwsResourceServlet(ResourceService service, LwsConfiguration config, WacAclService aclService,
+            LinksetService linksets, StorageDescriptionResponder storageDescription) {
         this.service = service;
         this.config = config;
         this.aclService = aclService;
         this.linksets = linksets;
+        this.storageDescription = storageDescription;
     }
 
     @Override
@@ -126,6 +134,17 @@ public final class LwsResourceServlet extends HttpServlet {
      */
     private void handleRead(HttpServletRequest req, HttpServletResponse resp, String path,
             LwsPrincipal principal, boolean writeBody) throws IOException {
+        // The storage URI is the root container's URI, so it has two representations. lws10-core
+        // says a request for the storage URI gets the storage description "unless content
+        // negotiation requires a different format": a client that asks for a container
+        // representation gets the listing below; anyone else — including a client that states no
+        // preference, and one that is not authorized to list the root — gets the description,
+        // which is public because it is how a client finds out how to authenticate.
+        if (storageDescription != null && Iris.isRoot(path)
+                && RdfFormats.prefersStorageDescription(req.getHeader("Accept"))) {
+            storageDescription.serve(req, resp, writeBody);
+            return;
+        }
         ReadResult rr = service.read(path, principal);
         LwsResource meta = rr.meta();
         if (rr.isContainer()) {
@@ -136,6 +155,7 @@ public final class LwsResourceServlet extends HttpServlet {
             RdfFormats.Entry fmt = RdfFormats.negotiate(req.getHeader("Accept"));
             LwsResource representation = meta.withEtag(Etags.qualify(meta.etag(), fmt.variantToken()));
             HttpSupport.setResourceHeaders(resp, representation, config);
+            addDeclaredTypeLinks(resp, meta.iri());
             addAclLink(resp, meta.iri());
             resp.setHeader("Accept-Patch", HttpSupport.ACCEPT_PATCH);
             HttpSupport.vary(resp, "Accept");
@@ -150,6 +170,7 @@ public final class LwsResourceServlet extends HttpServlet {
         // A non-RDF resource has exactly one representation — the bytes as stored — so its tag needs
         // no variant and its response does not vary on Accept.
         HttpSupport.setResourceHeaders(resp, meta, config);
+        addDeclaredTypeLinks(resp, meta.iri());
         addAclLink(resp, meta.iri());
         if (HttpSupport.ifNoneMatchMatches(req, meta) || HttpSupport.ifModifiedSinceNotModified(req, meta)) {
             resp.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
@@ -166,6 +187,7 @@ public final class LwsResourceServlet extends HttpServlet {
      */
     private void handleContainerRead(HttpServletRequest req, HttpServletResponse resp, LwsResource meta,
             ReadResult rr, boolean writeBody) throws IOException {
+        addDeclaredTypeLinks(resp, meta.iri());
         addAclLink(resp, meta.iri());
         resp.setHeader("Accept-Post", HttpSupport.ACCEPT_POST);
         HttpSupport.vary(resp, "Accept");
@@ -226,7 +248,11 @@ public final class LwsResourceServlet extends HttpServlet {
         // membership, which is what made page 1 of a 200,000-member container cost the same as page
         // 200 (finding M23). The window is bounded by lws.container.page-size.
         List<ChildDesc> items = service.describe(meta.iri(), window.stream().map(ChildRef::iri).toList());
-        byte[] body = containerJson(meta, items, total).getBytes(StandardCharsets.UTF_8);
+        // And the types each member's own metadata declares, which lws10-core lets a listing name
+        // alongside DataResource/Container — one read for the page, not one per member request.
+        Map<String, Set<String>> declared = linksets == null ? Map.of()
+                : linksets.declaredTypes(items.stream().map(ChildDesc::iri).toList());
+        byte[] body = containerJson(meta, items, total, declared).getBytes(StandardCharsets.UTF_8);
         resp.setContentType(RdfFormats.jsonFamilyContentType(accept) + ";charset=utf-8");
         addDigests(req, resp, body);
         resp.setContentLength(body.length);
@@ -305,17 +331,32 @@ public final class LwsResourceServlet extends HttpServlet {
     }
 
     /**
-     * The LWS container representation as {@code application/lws+json} (lws10-core). {@code items}
-     * is the current page; {@code totalItems} reflects the full membership.
+     * The LWS container representation as {@code application/lws+json} (lws10-core, Container
+     * Representation). {@code items} is the current page; {@code totalItems} reflects the full
+     * membership this client may be told about.
+     *
+     * <p>Each member carries {@code id}, {@code type} — {@code DataResource} or {@code Container},
+     * followed by any type its metadata declares —, {@code format} (a data resource's media type,
+     * which the core makes mandatory for data resources; it was {@code mediaType} until the drafts
+     * of 21 August 2026 replaced the Activity Streams terms), {@code size} and {@code modified}.
      */
-    private static String containerJson(LwsResource container, List<ChildDesc> pageItems, int totalItems) {
+    private static String containerJson(LwsResource container, List<ChildDesc> pageItems, int totalItems,
+            Map<String, Set<String>> declaredTypes) {
         jakarta.json.JsonArrayBuilder items = jakarta.json.Json.createArrayBuilder();
         for (ChildDesc child : pageItems) {
-            jakarta.json.JsonObjectBuilder item = jakarta.json.Json.createObjectBuilder()
-                    .add("type", child.container() ? "Container" : "DataResource")
-                    .add("id", child.iri());
-            if (!child.container() && child.mediaType() != null) {
-                item.add("mediaType", child.mediaType());
+            String structural = child.container() ? "Container" : "DataResource";
+            Set<String> declared = declaredTypes.getOrDefault(child.iri(), Set.of());
+            jakarta.json.JsonObjectBuilder item = jakarta.json.Json.createObjectBuilder();
+            if (declared.isEmpty()) {
+                item.add("type", structural);
+            } else {
+                jakarta.json.JsonArrayBuilder types = jakarta.json.Json.createArrayBuilder().add(structural);
+                declared.forEach(types::add);
+                item.add("type", types);
+            }
+            item.add("id", child.iri());
+            if (!child.container()) {
+                item.add("format", child.mediaType() != null ? child.mediaType() : "application/octet-stream");
             }
             if (child.size() >= 0) {
                 item.add("size", child.size());
@@ -692,6 +733,8 @@ public final class LwsResourceServlet extends HttpServlet {
             case "GET", "HEAD" -> {
                 requireResourceAccess(principal, targetPath, targetIri, false);
                 LinksetService.Linkset linkset = linksets.get(targetPath);
+                // A linkset is an auxiliary Storage Resource, so it links to its storage too.
+                HttpSupport.addStorageLink(resp, config);
                 resp.setHeader("Allow", ALLOW_LINKSET);
                 resp.setHeader("Accept-Patch", HttpSupport.ACCEPT_PATCH_JSON);
                 // Prefer: include="..." / omit="..." (the LWS PreferLinkRelations read preference).
@@ -819,6 +862,21 @@ public final class LwsResourceServlet extends HttpServlet {
 
     // ----- Web Access Control: ACL resources (governed by acl:Control on the target) -----
 
+    /**
+     * Advertise the types a resource's metadata declares as {@code Link: rel="type"}, after the
+     * structural ones. lws10-core has every Storage Resource carry its types in link headers — that
+     * is what an access grant's {@code type} constraint and the type index read — and a declared
+     * type is otherwise visible only to a client that fetches the linkset.
+     */
+    private void addDeclaredTypeLinks(HttpServletResponse resp, String iri) {
+        if (linksets == null) {
+            return;
+        }
+        for (String type : linksets.declaredTypes(iri)) {
+            resp.addHeader("Link", "<" + type + ">; rel=\"type\"");
+        }
+    }
+
     private void addAclLink(HttpServletResponse resp, String iri) {
         if (aclService != null) {
             resp.addHeader("Link", "<" + aclService.aclIriFor(iri) + ">; rel=\"acl\"");
@@ -850,6 +908,7 @@ public final class LwsResourceServlet extends HttpServlet {
                 RdfFormats.Entry fmt = RdfFormats.negotiate(req.getHeader("Accept"));
                 String etag = Etags.qualify(snapshot.etag(), fmt.variantToken());
                 HttpSupport.vary(resp, "Accept");
+                HttpSupport.addStorageLink(resp, config); // an ACL is an auxiliary Storage Resource
                 if (etag != null) {
                     resp.setHeader("ETag", "\"" + etag + "\"");
                     if (HttpSupport.ifNoneMatchMatches(req, etag)) {

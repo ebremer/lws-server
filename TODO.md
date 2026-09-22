@@ -9,6 +9,53 @@ Ordering is by *risk × reachability*, not by area. Items inside a priority band
 
 ---
 
+## Drafts band (D) — the LWS drafts of 21 September 2026 (2026-09-22)
+
+The server was brought up to the LWS editor's drafts as of **21 September 2026**
+(`w3c/lws-protocol` @ `3ddc642`). `COMPLIANCE.md` has the spec-by-spec account, the table of what
+changed upstream since the previous baseline, and the deliberate divergences; this is the work list.
+**Build:** `mvn -o clean test` → **561 tests, 0 failures** (521 before this band).
+
+- [x] **D-1 · Authorization baseline (lws10-core, Authorization).** Embedded authorization server:
+  token exchange (RFC 8693) at `<system-prefix>/token`, RFC 9068 `at+jwt` access tokens (ES256, key
+  `keys/oauth-es256.jwk`, 300 s, never outliving the credential, DPoP-bindable), RFC 8414 metadata at
+  `/.well-known/lws-configuration` with `subject_token_types_supported` and
+  `subject_identifier_types_supported`. `AccessTokenValidator` at the storage: signature (issuer
+  keys, rotation), issuer (embedded + `lws.oauth.trusted-issuers`), `aud` exactly this storage,
+  `exp`/`nbf`/`iat`, `sub`/`client_id`/`jti` required. Direct credentials kept
+  (`lws.oauth.accept-authentication-credentials`).
+- [x] **D-2 · Conforming 401 challenges** — `as_uri` + `realm`, and the storage link.
+- [x] **D-3 · Storage description as a CID document** — `application/lws+cid`, `[cid/v1, lws/v1]`,
+  `StorageRoot`, served at the storage URI (= root; `Accept` decides) and at the old address;
+  `rel="…lws#storage"` replaces `…#storageDescription` everywhere.
+- [x] **D-4 · Webhook signing key in the storage description** — `JsonWebKey` verification method
+  referenced from `authentication`; `keyid` is its id.
+- [x] **D-5 · Notification data model** — envelope, array types, `target`/`origin`, actor off by
+  default (`lws.notifications.include-actor`), `application/lws+json` deliveries; subscription
+  requests/responses/listings in `application/lws+json`.
+- [x] **D-6 · `format` replaces `mediaType`** — container items and the access-profile operand (the
+  old operand still read).
+- [x] **D-7 · Type Search is `QUERY`** — `application/lws-query+json`, `Accept-Query`, `400`/`415`/
+  `406`/`422`/`404`, empty filter matches all, relation keys from declared links, opaque page links.
+- [x] **D-8 · Access profile** — target matchers (`StorageResource`/`DataResource`/`Container`)
+  enforced; listings are paginated containers of data resources; client-bound grants hidden from
+  other clients; declared types count for `type` constraints.
+- [x] **D-9 · Self-signed CID suite** — CID 1.0 §3.3 retrieval (only `authentication` methods — the
+  low-tail item "SsiCidValidator accepts any verificationMethod…" is closed by this), controller,
+  revoked/expires, no private JWK members, `Multikey`; `did:key` and `did:web` subjects; `iat`
+  required.
+- [x] **D-10 · did:key suite discontinued** — kid-less did:key credentials still accepted,
+  deprecated; capability no longer advertised; `DidKeyTool` mints SSI-CID credentials (`kid`).
+- [x] **D-11 · OpenID subject documents read as JSON CID documents** (the suite's own example), with
+  the RDF reading as fallback; the CID v1 context bundled for JSON-LD parsing.
+- [x] **D-12 · Declared types in `Link: rel="type"`** on `GET`/`HEAD`, and in container item types.
+- [ ] **D-13 · OpenID EdDSA and the algorithm allow-list** — still the low-tail item below; not a
+  spec change.
+- [ ] **D-14 · Re-check against newer drafts.** Clone `w3c/lws-protocol` fresh and
+  `git log 3ddc642..` the `lws10-*` directories.
+
+---
+
 ## Resume here — state as of 2026-08-27 (late)
 
 **Done — Batches A through S. Every code item in P0, P1, P2 and P3 is closed, and so is the whole
@@ -33,10 +80,8 @@ oracle surfaces Batch Q had claimed were closed were not. All fixed; the account
 Batch T section, including three tests that were passing for the wrong reason and what was
 deliberately left open.
 
-**The whole remediation is still uncommitted, deliberately** — the last commit is `33a3bb4`, the
-*pre*-remediation code. Never read a file with `git show`: the committed version is the version
-every finding was written against, and it is now very stale. The tree is the only copy, so
-`git checkout .` or `git stash` would destroy the work.
+**The remediation was committed as `461663c`** on 2026-08-27, after this note was written; `33a3bb4`
+is the *pre*-remediation code every finding was written against.
 
 ---
 
@@ -51,8 +96,8 @@ doing next, in order:
 - `LwsOpenIdValidator` seeds its signature-algorithm allow-list from the **token's own header**,
   making the key-selector check tautological — and it cannot verify EdDSA ID tokens at all, though
   the codebase has an Ed25519 verifier.
-- `SsiCidValidator` accepts any `verificationMethod` carrying a matching `kid`, ignoring the
-  `authentication` verification relationship.
+- ~~`SsiCidValidator` accepts any `verificationMethod` carrying a matching `kid`, ignoring the
+  `authentication` verification relationship.~~ **Closed by D-9** (2026-09-22).
 - `SamlValidator` loads trust anchors as bare public keys, discarding certificate validity dates.
 - `AuthenticationFilter` downgrades a malformed or unknown-scheme `Authorization` header to
   anonymous instead of answering `401`.

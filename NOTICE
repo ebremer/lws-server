@@ -18,3 +18,16 @@ limitations under the License.
 This product depends on third-party software distributed under its own licenses.
 Those dependencies are declared in pom.xml; they are not redistributed in this
 source tree, and a packaged build carries their own licenses and notices with it.
+
+One third-party document is redistributed here, unmodified:
+
+    src/main/resources/contexts/cid-v1.jsonld
+        The JSON-LD context of W3C Controlled Identifiers 1.0,
+        https://www.w3.org/ns/cid/v1
+        Copyright (c) World Wide Web Consortium, distributed under the W3C
+        Software and Document License,
+        https://www.w3.org/copyright/software-license-2023/
+
+    It is bundled so that a controlled identifier document — a storage
+    description, or a subject document an authentication suite dereferences —
+    can be read as RDF without fetching a context at runtime.

@@ -40,9 +40,13 @@ import com.ebremer.lws.server.vocab.LWS;
  * covers the requested mode, whose {@code assignee} is the principal (or the public
  * {@code foaf:Agent}), and whose {@code target} covers the resource, authorizes the operation —
  * regardless of the underlying authorization model — so revoking a grant (deleting the record)
- * immediately removes the access. Constraints are evaluated fail-closed: {@code dateTime} and
- * {@code client} are honoured; a grant carrying any other constraint ({@code purpose}/{@code
- * mediaType}/{@code type}) is treated as inactive rather than over-granting.
+ * immediately removes the access. A policy's {@code target} names the resources by {@code value} —
+ * one IRI, or a container IRI covering everything beneath it — and by a target matcher
+ * {@code type}: {@code StorageResource} matches any resource, {@code DataResource} and
+ * {@code Container} only resources of that kind. Constraints are evaluated fail-closed: the
+ * {@code dateTime}, {@code client}, {@code format}, {@code type} and {@code purpose} operands the
+ * access profile requires are honoured, and a grant carrying any operand or operator this server
+ * does not understand authorizes nothing rather than over-granting.
  *
  * @author Erich Bremer
  */
@@ -95,6 +99,18 @@ public final class AccessService {
      * on {@code auth}; the server wires in the notification delivery policy.
      */
     private final Predicate<String> inboxPolicy;
+
+    /**
+     * The metadata service, for the types a grant target's metadata declares. Optional, and set
+     * after construction, because the linkset service is built on the resource service, which is
+     * built on the authorizer that consults this one.
+     */
+    private volatile LinksetService linksets;
+
+    /** Supply the metadata service whose declared types a {@code type} constraint should see. */
+    public void setLinksets(LinksetService linksets) {
+        this.linksets = linksets;
+    }
 
     /**
      * Whether the WebID that issued a grant is <em>still</em> a storage controller.
@@ -188,6 +204,51 @@ public final class AccessService {
 
     /** The media type and types of a grant target, loaded lazily for constraint evaluation. */
     private record TargetMetadata(String mediaType, Set<String> types) {
+    }
+
+    /**
+     * The target matcher types lws10-core defines, by term and by IRI. {@code StorageResource}
+     * (formerly any "resource managed by a storage") matches both kinds; the other two match their
+     * own kind only.
+     */
+    private static final Map<String, String> TARGET_MATCHERS = Map.of(
+            "StorageResource", LWS.StorageResource.getURI(),
+            LWS.StorageResource.getURI(), LWS.StorageResource.getURI(),
+            "DataResource", LWS.DataResource.getURI(),
+            LWS.DataResource.getURI(), LWS.DataResource.getURI(),
+            "Container", LWS.Container.getURI(),
+            LWS.Container.getURI(), LWS.Container.getURI());
+
+    /**
+     * The matcher a policy's {@code target} declares, as an LWS IRI; {@code StorageResource} when it
+     * declares none — the behaviour every grant stored before matchers were checked has always had —
+     * and {@code null} for a matcher this server does not implement.
+     */
+    private static String targetMatcher(JsonObject target) {
+        JsonValue type = target.get("type");
+        if (type == null) {
+            return LWS.StorageResource.getURI();
+        }
+        if (type.getValueType() != JsonValue.ValueType.STRING) {
+            return null;
+        }
+        return TARGET_MATCHERS.get(((JsonString) type).getString());
+    }
+
+    /** Whether the target's matcher type accepts the resource at hand (fail-closed on unknowns). */
+    private static boolean matcherAccepts(JsonObject policy, Supplier<TargetMetadata> target) {
+        JsonValue value = policy.get("target");
+        if (value == null || value.getValueType() != JsonValue.ValueType.OBJECT) {
+            return false;
+        }
+        String matcher = targetMatcher(value.asJsonObject());
+        if (matcher == null) {
+            return false;
+        }
+        if (matcher.equals(LWS.StorageResource.getURI())) {
+            return true;
+        }
+        return target.get().types().contains(matcher);
     }
 
     private Resource type(Kind kind) {
@@ -452,6 +513,7 @@ public final class AccessService {
                 && assigneeMatches(policy, principal)
                 && actionGrants(policy, mode)
                 && targetCovers(policy, iri)
+                && matcherAccepts(policy, target)
                 && constraintsSatisfied(policy, principal, now, target);
     }
 
@@ -552,7 +614,9 @@ public final class AccessService {
                     default -> false;
                 };
             }
-            case "mediaType" -> {
+            // `format` since the drafts of 21 August 2026, which replaced the Activity Streams
+            // `mediaType`; grants written with the old operand keep their meaning.
+            case "format", "mediaType" -> {
                 String mediaType = target.get().mediaType();
                 if (mediaType == null) {
                     return false;
@@ -599,6 +663,13 @@ public final class AccessService {
                 return new TargetMetadata(null, Set.of());
             }
             Set<String> types = advertisedTypes(resource.type());
+            // And the types its metadata declares: those are advertised as Link: rel="type" too, and
+            // the access profile's `type` operand is "the type URL expressed in a resource's link
+            // headers".
+            LinksetService meta = linksets;
+            if (meta != null) {
+                types.addAll(meta.declaredTypes(conn, iri));
+            }
             ParameterizedSparqlString q = new ParameterizedSparqlString();
             q.setCommandText("""
                     SELECT DISTINCT ?t WHERE {
@@ -796,6 +867,12 @@ public final class AccessService {
         List<String> values = strings(target.asJsonObject(), "value");
         if (values.isEmpty()) {
             throw LwsException.badRequest("each access policy \"target\" requires a non-empty \"value\"");
+        }
+        // Refused now rather than stored and then never matched: a matcher this server does not
+        // implement would make the grant authorize nothing, silently.
+        if (targetMatcher(target.asJsonObject()) == null) {
+            throw LwsException.badRequest("unsupported target type " + target.asJsonObject().get("type")
+                    + "; expected StorageResource, DataResource or Container");
         }
         for (String value : values) {
             if (Iris.toPath(config.baseUri(), value) == null) {

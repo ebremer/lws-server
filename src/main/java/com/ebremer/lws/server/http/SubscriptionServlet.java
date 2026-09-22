@@ -1,6 +1,7 @@
 package com.ebremer.lws.server.http;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import jakarta.json.Json;
@@ -27,15 +28,29 @@ import com.ebremer.lws.server.rdf.RdfIO;
 import com.ebremer.lws.server.vocab.LWS;
 
 /**
- * The notification {@code NotificationService} endpoint. The collection IRI supports POST (create
- * a subscription, with authorization enforced over every topic) and GET (list the caller's
- * subscriptions as an LWS container). Individual subscription resources support GET and DELETE.
+ * The {@code NotificationService} endpoint (lws10-core, Subscriptions; lws10-notifications-webhook).
+ *
+ * <ul>
+ *   <li>{@code POST} the endpoint with an {@code application/lws+json} subscription request creates a
+ *       subscription, with read authorization enforced over every topic, and answers {@code 201}
+ *       with its {@code Location} and an {@code application/lws+json} body carrying {@code type},
+ *       {@code subscription} and {@code expires}.</li>
+ *   <li>{@code GET} the endpoint lists the caller's active subscriptions as an LWS container,
+ *       paginated like any other.</li>
+ *   <li>{@code GET} a subscription returns its current state; {@code DELETE} cancels it.</li>
+ * </ul>
+ *
+ * <p>Every representation is JSON by default; a client that ranks an RDF serialization higher gets
+ * RDF instead, as before.
  *
  * @author Erich Bremer
  */
 public final class SubscriptionServlet extends HttpServlet {
 
     private static final Logger log = LoggerFactory.getLogger(SubscriptionServlet.class);
+
+    private static final String ALLOW_COLLECTION = "GET, HEAD, POST, OPTIONS";
+    private static final String ALLOW_MEMBER = "GET, HEAD, DELETE, OPTIONS";
 
     private final transient SubscriptionService subscriptions;
     private final transient LwsConfiguration config;
@@ -60,6 +75,9 @@ public final class SubscriptionServlet extends HttpServlet {
                     create(req, resp, principal);
                 }
                 case "GET", "HEAD" -> {
+                    // The endpoint and each subscription are Storage Resources (the endpoint is an
+                    // LWS container), so they link to their storage like every other one.
+                    HttpSupport.addStorageLink(resp, config);
                     if (collection) {
                         listCollection(req, resp, principal);
                     } else {
@@ -73,9 +91,9 @@ public final class SubscriptionServlet extends HttpServlet {
                     deleteOne(resp, principal, id);
                 }
                 case "OPTIONS" -> {
-                    resp.setHeader("Allow", collection ? "GET, HEAD, POST, OPTIONS" : "GET, HEAD, DELETE, OPTIONS");
+                    resp.setHeader("Allow", collection ? ALLOW_COLLECTION : ALLOW_MEMBER);
                     if (collection) {
-                        resp.setHeader("Accept-Post", "application/ld+json, application/json");
+                        resp.setHeader("Accept-Post", HttpSupport.LWS_JSON + ", application/ld+json, application/json");
                     }
                     resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
                 }
@@ -88,8 +106,7 @@ public final class SubscriptionServlet extends HttpServlet {
             if (e.status() == 405) {
                 // Mandatory on a 405 (RFC 9110 §15.5.6). AccessServlet is a near-verbatim twin of
                 // this switch and gained the same line; this is the branch next to it.
-                resp.setHeader("Allow", collection
-                        ? "GET, HEAD, POST, OPTIONS" : "GET, HEAD, DELETE, OPTIONS");
+                resp.setHeader("Allow", collection ? ALLOW_COLLECTION : ALLOW_MEMBER);
             }
             sendProblem(resp, e.status(), e.getMessage());
         } catch (RuntimeException e) {
@@ -100,7 +117,8 @@ public final class SubscriptionServlet extends HttpServlet {
 
     private void create(HttpServletRequest req, HttpServletResponse resp, LwsPrincipal principal) throws IOException {
         // Anonymous subscription is a supported configuration, so this body may arrive with no
-        // credential at all: state what is acceptable before spending anything on it.
+        // credential at all: state what is acceptable before spending anything on it. The request
+        // MUST be application/lws+json (lws10-core); ld+json and json are the same document.
         HttpSupport.requireJsonContentType(req);
         JsonObject request;
         byte[] raw = HttpSupport.readBody(req, config.maxRequestBytes());
@@ -113,7 +131,7 @@ public final class SubscriptionServlet extends HttpServlet {
         Subscription sub = subscriptions.create(principal, request);
         resp.setStatus(HttpServletResponse.SC_CREATED);
         resp.setHeader("Location", sub.id());
-        writeRdf(req, resp, subscriptions.describe(sub), true);
+        write(req, resp, sub, true);
     }
 
     /**
@@ -125,18 +143,34 @@ public final class SubscriptionServlet extends HttpServlet {
      * inbox URLs and topics included (finding L39). Whether anonymous subscriptions can exist is
      * governed separately by {@code lws.subscriptions.allow-anonymous}; that they were readable by
      * anyone was this.
+     *
+     * <p>The listing is an LWS container representation (lws10-notifications-webhook requires the
+     * serialization to conform to LWS containers), paginated at {@code lws.container.page-size}.
      */
     private void listCollection(HttpServletRequest req, HttpServletResponse resp, LwsPrincipal principal)
             throws IOException {
         List<Subscription> subs = subscriptions.listVisibleTo(principal);
-        Model m = ModelFactory.createDefaultModel();
-        m.setNsPrefix(LWS.PREFIX, LWS.NS);
-        Resource c = m.createResource(config.subscriptionsEndpointIri());
-        c.addProperty(RDF.type, LWS.Container);
-        for (Subscription s : subs) {
-            c.addProperty(LWS.items, m.createResource(s.id()));
+        boolean body = req.getMethod().equals("GET");
+        if (RdfFormats.prefersRdf(req.getHeader("Accept"))) {
+            Model m = ModelFactory.createDefaultModel();
+            m.setNsPrefix(LWS.PREFIX, LWS.NS);
+            Resource c = m.createResource(config.subscriptionsEndpointIri());
+            c.addProperty(RDF.type, LWS.Container);
+            c.addLiteral(LWS.totalItems, (long) subs.size());
+            for (Subscription s : subs) {
+                c.addProperty(LWS.items, m.createResource(s.id()));
+            }
+            writeRdf(req, resp, m, body);
+            return;
         }
-        writeRdf(req, resp, m, req.getMethod().equals("GET"));
+        List<JsonObject> members = new ArrayList<>(subs.size());
+        for (Subscription s : subs) {
+            members.add(LwsJsonContainers.member(s.id(), "WebhookSubscription"));
+        }
+        LwsJsonContainers.Page page = LwsJsonContainers.page(members,
+                LwsJsonContainers.requestedPage(req), config.containerPageSize());
+        JsonObject doc = LwsJsonContainers.document(resp, config.subscriptionsEndpointIri(), page);
+        LwsJsonContainers.write(req, resp, doc, body);
     }
 
     private void getOne(HttpServletRequest req, HttpServletResponse resp, LwsPrincipal principal, String id)
@@ -146,7 +180,7 @@ public final class SubscriptionServlet extends HttpServlet {
             throw LwsException.notFound(id);
         }
         requireManage(principal, sub.get());
-        writeRdf(req, resp, subscriptions.describe(sub.get()), req.getMethod().equals("GET"));
+        write(req, resp, sub.get(), req.getMethod().equals("GET"));
     }
 
     private void deleteOne(HttpServletResponse resp, LwsPrincipal principal, String id) {
@@ -165,12 +199,23 @@ public final class SubscriptionServlet extends HttpServlet {
         subscriptions.requireManage(principal, sub);
     }
 
+    /** One subscription's state: lws+json by default, RDF for a client that ranks RDF higher. */
+    private void write(HttpServletRequest req, HttpServletResponse resp, Subscription sub, boolean writeBody)
+            throws IOException {
+        if (RdfFormats.prefersRdf(req.getHeader("Accept"))) {
+            writeRdf(req, resp, subscriptions.describe(sub), writeBody);
+        } else {
+            LwsJsonContainers.write(req, resp, subscriptions.describeJson(sub), writeBody);
+        }
+    }
+
     private void writeRdf(HttpServletRequest req, HttpServletResponse resp, Model model, boolean writeBody)
             throws IOException {
         RdfFormats.Entry fmt = RdfFormats.negotiate(req.getHeader("Accept"));
         byte[] body = RdfIO.write(model, fmt.writeFormat());
         resp.setContentType(fmt.mediaType() + ";charset=utf-8");
         HttpSupport.vary(resp, "Accept");
+        HttpSupport.setPrivateNoStore(resp);
         resp.setContentLength(body.length);
         if (writeBody) {
             resp.getOutputStream().write(body);

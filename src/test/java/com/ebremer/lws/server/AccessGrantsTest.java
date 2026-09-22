@@ -1,6 +1,7 @@
 package com.ebremer.lws.server;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.StringReader;
 import java.net.ServerSocket;
@@ -131,11 +132,14 @@ class AccessGrantsTest {
 
     @Test
     void requestLifecycle() throws Exception {
-        // Anonymous may not submit a request; the 401 points at the storage description.
+        // Anonymous may not submit a request; the 401 links to the storage, whose URI dereferences
+        // to the storage description (lws10-core).
         HttpResponse<String> anon = send("POST", "/.lws/access-requests",
                 requestJson("[\"read\"]", bobDid, baseUrl + "/data/"), "application/lws+json");
         assertEquals(401, anon.statusCode());
-        assertTrue(anon.headers().allValues("Link").stream().anyMatch(l -> l.contains("storageDescription")));
+        assertTrue(anon.headers().allValues("Link").stream()
+                .anyMatch(l -> l.contains("<" + baseUrl + "/>; rel=\"https://www.w3.org/ns/lws#storage\"")),
+                anon.headers().allValues("Link").toString());
 
         // Bob submits a request, can list and retrieve his own, then cancels it.
         HttpResponse<String> created = bob("POST", "/.lws/access-requests",
@@ -151,15 +155,19 @@ class AccessGrantsTest {
         assertEquals(404, bob("GET", path(id), null, null).statusCode());
     }
 
+    /**
+     * The access profile's {@code format} operand — {@code mediaType} until the drafts of
+     * 21 August 2026 replaced the Activity Streams terms — gates a grant on the target's media type.
+     */
     @Test
-    void mediaTypeConstraintGatesTheGrant() throws Exception {
+    void formatConstraintGatesTheGrant() throws Exception {
         assertEquals(201, owner("PUT", "/photo", "PNGDATA", "image/png").statusCode());
         // 404, not 403: an authenticated principal without Read is not told whether the
         // resource is there (lws.mask-forbidden-as-not-found).
         assertEquals(404, bob("GET", "/photo", null, null).statusCode());
 
-        // A grant whose mediaType constraint does not match the target does not enable access.
-        String mismatch = grantWithConstraint(baseUrl + "/photo", "mediaType", "eq", "image/jpeg");
+        // A grant whose format constraint does not match the target does not enable access.
+        String mismatch = grantWithConstraint(baseUrl + "/photo", "format", "eq", "image/jpeg");
         String mismatchId = owner("POST", "/.lws/access-grants", mismatch, "application/lws+json")
                 .headers().firstValue("Location").orElseThrow();
         // 404, not 403: an authenticated principal without Read is not told whether the
@@ -167,10 +175,116 @@ class AccessGrantsTest {
         assertEquals(404, bob("GET", "/photo", null, null).statusCode());
         assertEquals(204, owner("DELETE", path(mismatchId), null, null).statusCode());
 
-        // A matching mediaType constraint enables it.
-        String match = grantWithConstraint(baseUrl + "/photo", "mediaType", "eq", "image/png");
+        // A matching format constraint enables it.
+        String match = grantWithConstraint(baseUrl + "/photo", "format", "eq", "image/png");
         assertEquals(201, owner("POST", "/.lws/access-grants", match, "application/lws+json").statusCode());
         assertEquals(200, bob("GET", "/photo", null, null).statusCode());
+    }
+
+    /** A grant written with the pre-August operand name keeps the meaning it was issued with. */
+    @Test
+    void theFormerMediaTypeOperandStillGatesAGrant() throws Exception {
+        assertEquals(201, owner("PUT", "/legacy-photo", "PNGDATA", "image/png").statusCode());
+        String grant = owner("POST", "/.lws/access-grants",
+                grantWithConstraint(baseUrl + "/legacy-photo", "mediaType", "eq", "image/png"), "application/lws+json")
+                .headers().firstValue("Location").orElseThrow();
+        try {
+            assertEquals(200, bob("GET", "/legacy-photo", null, null).statusCode());
+        } finally {
+            owner("DELETE", pathOf(grant), null, null);
+        }
+    }
+
+    /**
+     * A target's matcher {@code type} restricts what its {@code value} covers (lws10-core, Access
+     * Profile): {@code Container} matches containers only, {@code DataResource} data resources only,
+     * {@code StorageResource} both — and a matcher this server does not implement is refused.
+     */
+    @Test
+    void theTargetMatcherTypeRestrictsTheGrantToItsKind() throws Exception {
+        assertEquals(201, owner("PUT", "/tm/", null, null,
+                "Link", "<https://www.w3.org/ns/lws#Container>; rel=\"type\"").statusCode());
+        assertEquals(201, owner("PUT", "/tm/file", "<#it> <http://schema.org/name> \"x\" .", "text/turtle").statusCode());
+
+        String containersOnly = owner("POST", "/.lws/access-grants",
+                grantJson("[\"read\"]", bobDid, baseUrl + "/tm/").replace("\"StorageResource\"", "\"Container\""),
+                "application/lws+json").headers().firstValue("Location").orElseThrow();
+        try {
+            assertEquals(200, bob("GET", "/tm/", null, null).statusCode(), "the container matches");
+            assertEquals(404, bob("GET", "/tm/file", null, null).statusCode(), "a data resource under it does not");
+        } finally {
+            owner("DELETE", pathOf(containersOnly), null, null);
+        }
+
+        String dataOnly = owner("POST", "/.lws/access-grants",
+                grantJson("[\"read\"]", bobDid, baseUrl + "/tm/")
+                        .replace("\"StorageResource\"", "\"https://www.w3.org/ns/lws#DataResource\""),
+                "application/lws+json").headers().firstValue("Location").orElseThrow();
+        try {
+            assertEquals(200, bob("GET", "/tm/file", null, null).statusCode(), "the data resource matches");
+            assertEquals(404, bob("GET", "/tm/", null, null).statusCode(), "the container does not");
+        } finally {
+            owner("DELETE", pathOf(dataOnly), null, null);
+        }
+
+        assertEquals(400, owner("POST", "/.lws/access-grants",
+                grantJson("[\"read\"]", bobDid, baseUrl + "/tm/").replace("\"StorageResource\"", "\"Resource\""),
+                "application/lws+json").statusCode(), "an unknown matcher is refused, not stored inert");
+    }
+
+    /**
+     * The endpoints are LWS containers (lws10-core): the listing is a container representation whose
+     * members are data resources, each also typed as what it is and carrying its format.
+     */
+    @Test
+    void theGrantEndpointListsAContainerOfDataResources() throws Exception {
+        String grant = owner("POST", "/.lws/access-grants", grantJson("[\"read\"]", bobDid, baseUrl + "/doc1"),
+                "application/lws+json").headers().firstValue("Location").orElseThrow();
+        try {
+            HttpResponse<String> r = owner("GET", "/.lws/access-grants", null, null);
+            assertEquals(200, r.statusCode());
+            assertTrue(r.headers().allValues("Link")
+                    .contains("<" + baseUrl + "/>; rel=\"https://www.w3.org/ns/lws#storage\""));
+            JsonObject doc = parse(r.body());
+            assertEquals("Container", doc.getString("type"));
+            assertEquals(baseUrl + "/.lws/access-grants", doc.getString("id"));
+            JsonObject item = null;
+            for (JsonValue v : doc.getJsonArray("items")) {
+                if (v.asJsonObject().getString("id").equals(grant)) {
+                    item = v.asJsonObject();
+                }
+            }
+            assertTrue(item != null, doc.toString());
+            assertEquals(Json.createArrayBuilder().add("DataResource").add("AccessGrant").build(),
+                    item.getJsonArray("type"));
+            assertEquals("application/lws+json", item.getString("format"));
+        } finally {
+            owner("DELETE", pathOf(grant), null, null);
+        }
+    }
+
+    /**
+     * lws10-core's privacy considerations: a grant usable only through one client is not shown to
+     * its assignee through another one.
+     */
+    @Test
+    void aClientBoundGrantIsVisibleOnlyThroughThatClient() throws Exception {
+        String foreign = owner("POST", "/.lws/access-grants",
+                grantWithConstraint(baseUrl + "/doc1", "client", "eq", "https://some-other-client.example"),
+                "application/lws+json").headers().firstValue("Location").orElseThrow();
+        String own = owner("POST", "/.lws/access-grants",
+                grantWithConstraint(baseUrl + "/doc1", "client", "eq", bobDid),
+                "application/lws+json").headers().firstValue("Location").orElseThrow();
+        try {
+            Set<String> visible = ids(parse(bob("GET", "/.lws/access-grants", null, null).body()));
+            assertTrue(visible.contains(own), "the grant for Bob's own client is listed");
+            assertFalse(visible.contains(foreign), "the grant for another client is not");
+            assertEquals(403, bob("GET", pathOf(foreign), null, null).statusCode());
+            assertEquals(200, bob("GET", pathOf(own), null, null).statusCode());
+        } finally {
+            owner("DELETE", pathOf(foreign), null, null);
+            owner("DELETE", pathOf(own), null, null);
+        }
     }
 
     @Test

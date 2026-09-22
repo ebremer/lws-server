@@ -82,7 +82,8 @@ class EndToEndTest {
         assertTrue(root.body().contains("Container"), "root should be an lws:Container");
         List<String> links = root.headers().allValues("Link");
         assertTrue(links.stream().anyMatch(l -> l.contains("rel=\"type\"")), "type Link header");
-        assertTrue(links.stream().anyMatch(l -> l.contains("storageDescription")), "storageDescription Link");
+        assertTrue(links.stream().anyMatch(l -> l.contains("<" + baseUrl + "/>; rel=\"https://www.w3.org/ns/lws#storage\"")),
+                "the link to the storage: " + links);
 
         assertTrue(send("GET", "/.lws/storage-description", null, null, "Accept", "text/turtle")
                 .body().contains("NotificationService"));
@@ -162,9 +163,11 @@ class EndToEndTest {
         assertEquals(403, send("DELETE", "/", null, null).statusCode(), "cannot delete the root");
         HttpResponse<String> unauth = send("GET", "/", null, null, "Authorization", "Bearer not.a.jwt");
         assertEquals(401, unauth.statusCode());
-        // A 401 points the client at the storage description so it can discover how to authenticate.
-        assertTrue(unauth.headers().allValues("Link").stream().anyMatch(l -> l.contains("storageDescription")),
-                "401 should carry a storageDescription Link");
+        // A 401 links to the storage, whose URI dereferences to the storage description, so the
+        // client can discover how to authenticate (lws10-core).
+        assertTrue(unauth.headers().allValues("Link").stream()
+                        .anyMatch(l -> l.contains("rel=\"https://www.w3.org/ns/lws#storage\"")),
+                "401 should link to the storage");
     }
 
     @Test
@@ -177,13 +180,30 @@ class EndToEndTest {
                 "anonymous subscription creation is refused by default");
 
         String token = DidKeyTool.mint(null, 3600, baseUrl).token();
-        HttpResponse<String> created = send("POST", "/.lws/subscriptions", "application/ld+json", json,
+        // The request is application/lws+json (lws10-core, Subscriptions).
+        HttpResponse<String> created = send("POST", "/.lws/subscriptions", "application/lws+json", json,
                 "Authorization", "Bearer " + token);
         assertEquals(201, created.statusCode());
         String location = created.headers().firstValue("Location").orElse(null);
         assertNotNull(location);
+        // ...and so is the response, carrying the subscription type, its URL and the expiry the
+        // server applied (lws10-notifications-webhook).
+        assertTrue(created.headers().firstValue("Content-Type").orElse("").startsWith("application/lws+json"));
+        jakarta.json.JsonObject response = jakarta.json.Json.createReader(
+                new java.io.StringReader(created.body())).readObject();
+        assertEquals("WebhookSubscription", response.getString("type"));
+        assertEquals(location, response.getString("subscription"));
+        assertTrue(response.containsKey("expires"), created.body());
 
         String auth = "Bearer " + token;
+        // The endpoint lists subscriptions as an LWS container, by default in JSON.
+        jakarta.json.JsonObject listing = jakarta.json.Json.createReader(new java.io.StringReader(
+                send("GET", "/.lws/subscriptions", null, null, "Authorization", auth).body())).readObject();
+        assertEquals("Container", listing.getString("type"));
+        assertEquals(1, listing.getInt("totalItems"));
+        jakarta.json.JsonObject member = listing.getJsonArray("items").getJsonObject(0);
+        assertEquals(location, member.getString("id"));
+        assertEquals("[\"DataResource\",\"WebhookSubscription\"]", member.getJsonArray("type").toString());
         // The collection lists only the caller's own subscriptions, and an individual subscription
         // is readable and deletable only by its subscriber (or a storage controller).
         assertTrue(send("GET", "/.lws/subscriptions", null, null,

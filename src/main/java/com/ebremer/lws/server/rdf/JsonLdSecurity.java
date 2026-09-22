@@ -140,6 +140,29 @@ public final class JsonLdSecurity {
         RIOT.getContext().set(LangJSONLD11.JSONLD_OPTIONS, options);
     }
 
+    /** Contexts bundled with the server, by URL, and the classpath resource each is read from. */
+    private static final java.util.Map<String, String> BUNDLED = java.util.Map.of(
+            "https://www.w3.org/ns/cid/v1", "/contexts/cid-v1.jsonld");
+
+    /** A bundled context, parsed, or {@code null} if {@code url} is not one. */
+    private static Document bundled(URI url) throws JsonLdError {
+        String resource = BUNDLED.get(url.toString());
+        if (resource == null) {
+            return null;
+        }
+        try (InputStream in = JsonLdSecurity.class.getResourceAsStream(resource)) {
+            if (in == null) {
+                return null;
+            }
+            JsonDocument document = JsonDocument.of(in);
+            document.setDocumentUrl(url);
+            return document;
+        } catch (java.io.IOException e) {
+            throw new JsonLdError(JsonLdErrorCode.LOADING_REMOTE_CONTEXT_FAILED,
+                    "Could not read the bundled context for " + url + ": " + e);
+        }
+    }
+
     private static final class GuardedContextLoader implements DocumentLoader {
 
         private final Set<String> allowedHosts;
@@ -154,6 +177,14 @@ public final class JsonLdSecurity {
 
         @Override
         public Document loadDocument(URI url, DocumentLoaderOptions options) throws JsonLdError {
+            // A context this server ships is answered from the classpath, whatever the allow-list
+            // says: nothing is fetched, so none of the reasons for refusing a remote context apply.
+            // The CID v1 context is the one every controlled identifier document — and so every LWS
+            // storage description and subject document — starts with.
+            Document bundled = bundled(url);
+            if (bundled != null) {
+                return bundled;
+            }
             String host = url.getHost();
             boolean permitted = host != null
                     && "https".equalsIgnoreCase(url.getScheme())

@@ -53,9 +53,12 @@ public final class LinksetService implements ResourceCleanup {
     public static final String META_GRAPH = "urn:x-lws:linkset";
     private static final String USER_META = "urn:x-lws:userMetadata";
 
-    /** Relations the server manages; a client cannot set or override these. */
+    /**
+     * Relations the server manages; a client cannot set or override these. The storage relation's
+     * pre-lws10-core name is still refused, so an old client cannot plant a link contradicting it.
+     */
     private static final Set<String> SERVER_MANAGED =
-            Set.of("anchor", "up", "linkset", LWS.NS + "storageDescription");
+            Set.of("anchor", "up", "linkset", LWS.REL_STORAGE, LWS.NS + "storageDescription");
 
     /**
      * The one relation a client may <em>add</em> to without being able to override it.
@@ -169,6 +172,85 @@ public final class LinksetService implements ResourceCleanup {
                     out.add(href);
                 }
             }
+        }
+        return out;
+    }
+
+    /** The types a client has declared for a resource, in a read of their own. */
+    public Set<String> declaredTypes(String iri) {
+        return rdf.read(conn -> declaredTypes(conn, iri));
+    }
+
+    /**
+     * The declared types of several resources in one read — a container page's members — keyed by
+     * IRI; a resource that declares none is absent.
+     */
+    public Map<String, Set<String>> declaredTypes(java.util.Collection<String> iris) {
+        if (iris.isEmpty()) {
+            return Map.of();
+        }
+        return rdf.read(conn -> {
+            Map<String, Set<String>> out = new java.util.HashMap<>();
+            for (String iri : iris) {
+                Set<String> types = declaredTypes(conn, iri);
+                if (!types.isEmpty()) {
+                    out.put(iri, types);
+                }
+            }
+            return out;
+        });
+    }
+
+    /**
+     * The targets every resource declares for one link relation, keyed by resource IRI: what the
+     * Type Search Service matches a relation key against (lws10-index). A registered relation name
+     * is compared case-insensitively, as RFC 8288 §2.1.1 requires; an extension relation is a URI
+     * and is compared exactly. The server-managed relations are never answered, whatever the key —
+     * lws10-index forbids indexing structural and protocol relations.
+     */
+    public Map<String, Set<String>> declaredRelationTargets(RDFConnection conn, String relation) {
+        Map<String, Set<String>> out = new java.util.HashMap<>();
+        if (relation == null || relation.isBlank() || isServerRelation(SERVER_MANAGED, relation)
+                || isServerRelation(SERVER_AUGMENTED, relation)) {
+            return out;
+        }
+        boolean registered = !relation.contains(":");
+        ParameterizedSparqlString q = new ParameterizedSparqlString();
+        q.setCommandText("SELECT ?s ?json WHERE { GRAPH ?g { ?s ?p ?json } }");
+        q.setIri("g", META_GRAPH);
+        q.setIri("p", USER_META);
+        conn.querySelect(q.asQuery(), row -> {
+            Set<String> targets = relationTargetsOf(row.getLiteral("json").getString(), relation, registered);
+            if (!targets.isEmpty()) {
+                out.put(row.getResource("s").getURI(), targets);
+            }
+        });
+        return out;
+    }
+
+    private static Set<String> relationTargetsOf(String json, String relation, boolean registered) {
+        Set<String> out = new java.util.LinkedHashSet<>();
+        try {
+            JsonLimits.requireBoundedNesting(json, JsonLimits.MAX_NESTING_DEPTH);
+            try (JsonReader reader = Json.createReader(new StringReader(json))) {
+                for (Map.Entry<String, JsonValue> entry : reader.readObject().entrySet()) {
+                    boolean same = registered ? entry.getKey().equalsIgnoreCase(relation)
+                            : entry.getKey().equals(relation);
+                    if (!same || entry.getValue().getValueType() != JsonValue.ValueType.ARRAY) {
+                        continue;
+                    }
+                    for (JsonValue target : entry.getValue().asJsonArray()) {
+                        if (target.getValueType() == JsonValue.ValueType.OBJECT) {
+                            String href = target.asJsonObject().getString("href", null);
+                            if (href != null) {
+                                out.add(href);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (RuntimeException | StackOverflowError e) {
+            return Set.of();
         }
         return out;
     }
@@ -508,7 +590,7 @@ public final class LinksetService implements ResourceCleanup {
             anchor.add("up", hrefs(meta.parentIri()));
         }
         anchor.add("linkset", hrefs(Iris.linkset(meta.iri())));
-        anchor.add(LWS.NS + "storageDescription", hrefs(config.storageDescriptionIri()));
+        anchor.add(LWS.REL_STORAGE, hrefs(config.storageIri()));
         for (var entry : user.entrySet()) {
             if (!isServerRelation(SERVER_MANAGED, entry.getKey())
                     && !isServerRelation(SERVER_AUGMENTED, entry.getKey())) {

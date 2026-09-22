@@ -41,8 +41,27 @@ public final class HttpSupport {
     private HttpSupport() {
     }
 
-    /** Link relation pointing to the storage description resource. */
+    /**
+     * The link relation from every Storage Resource to the canonical URI of its storage, which
+     * dereferences to the storage description (lws10-core, Discovery and Binding).
+     */
+    public static final String REL_STORAGE = LWS.REL_STORAGE;
+
+    /**
+     * The relation this server used before lws10-core defined {@link #REL_STORAGE}. No longer sent;
+     * kept so code and tests that name it still compile.
+     */
+    @Deprecated
     public static final String REL_STORAGE_DESCRIPTION = LWS.NS + "storageDescription";
+
+    /** Media type of the storage description (lws10-core, LWS Media Type). */
+    public static final String LWS_CID = RdfFormats.LWS_CID;
+
+    /** Media type of the Type Search Service's baseline filter format (lws10-index). */
+    public static final String LWS_QUERY_JSON = "application/lws-query+json";
+
+    /** The JWS algorithms this server verifies, as a DPoP challenge's {@code algs} (RFC 9449 §7.1). */
+    public static final String DPOP_ALGS = "ES256 ES384 ES512 EdDSA RS256 RS384 RS512 PS256 PS384 PS512";
 
     /** JSON Merge Patch (RFC 7386). */
     public static final String MERGE_PATCH = "application/merge-patch+json";
@@ -58,7 +77,7 @@ public final class HttpSupport {
     /** {@code Accept-Patch} for JSON resources and linksets: JSON Merge Patch or JSON Patch. */
     public static final String ACCEPT_PATCH_JSON = MERGE_PATCH + ", " + JSON_PATCH;
 
-    /** Media type for Search/Type Index requests and responses (lws10-searchindex). */
+    /** Media type of LWS container representations and the other LWS JSON-LD documents. */
     public static final String LWS_JSON = "application/lws+json";
     /** The JSON-LD context referenced by {@code application/lws+json} documents. */
     public static final String LWS_JSON_CONTEXT = LWS.JSON_CONTEXT;
@@ -131,23 +150,70 @@ public final class HttpSupport {
     }
 
     /**
-     * Set the headers a {@code 401} response should carry: {@code WWW-Authenticate}, and a
-     * {@code Link} to the storage description so a client can discover how to authenticate without
-     * a hardcoded URI (lws10-core SHOULD).
+     * Set the headers a {@code 401} response should carry: the {@code WWW-Authenticate} challenges
+     * and a {@code Link} to the storage (lws10-core, Authorization Server Discovery).
+     *
+     * <p>Every scheme this storage accepts, not just Bearer: RFC 9110 §11.6.1 lets a 401 carry more
+     * than one challenge, and a client that can only do DPoP had no way to discover that this server
+     * speaks it. Each challenge is a conforming one — {@code as_uri} naming the authorization server
+     * that issues this storage's access tokens, {@code realm} naming the storage — so a client can
+     * find where to get a token, and what to ask for, from the refusal alone. The scheme-specific
+     * 401s raised inside {@code AuthenticationFilter} name the single scheme the request actually
+     * used; this is the generic one, raised where no scheme was chosen yet.
      */
     public static void setUnauthorizedHeaders(HttpServletResponse response, LwsConfiguration config) {
-        // Every scheme this storage accepts, not just Bearer. RFC 9110 §11.6.1 lets a 401 carry
-        // more than one challenge, and a client that can only do DPoP had no way to discover that
-        // this server speaks it — which is what the README claims discovery is for. The
-        // scheme-specific 401s raised inside AuthenticationFilter still name the single scheme the
-        // request actually used; this is the generic one, raised where no scheme was chosen yet.
-        response.setHeader("WWW-Authenticate", "Bearer realm=\"lws\"");
-        response.addHeader("WWW-Authenticate", "DPoP realm=\"lws\"");
+        response.setHeader("WWW-Authenticate", challenge("Bearer", config, null, null));
+        response.addHeader("WWW-Authenticate", challenge("DPoP", config, null, null));
         if (!config.samlTrustedIssuers().isEmpty()) {
-            response.addHeader("WWW-Authenticate", "SAML2 realm=\"lws\"");
+            response.addHeader("WWW-Authenticate", challenge("SAML2", config, null, null));
         }
-        response.addHeader("Link",
-                "<" + config.storageDescriptionIri() + ">; rel=\"" + REL_STORAGE_DESCRIPTION + "\"");
+        addStorageLink(response, config);
+    }
+
+    /**
+     * One {@code WWW-Authenticate} challenge in the lws10-core shape.
+     *
+     * <p>{@code as_uri} is the issuer of the authorization server a client should ask, and is the
+     * {@code iss} of the access token it will get; {@code realm} is the storage URI, which the
+     * token's {@code aud} will carry and which a client must check logically contains the URI it
+     * requested. Both are REQUIRED of a conforming challenge; {@code as_uri} is left out only when
+     * this storage names no authorization server at all, which configuration warns about. A DPoP
+     * challenge also lists the proof algorithms this server verifies (RFC 9449 §7.1).
+     *
+     * @param error            an RFC 6750 error code, or {@code null} for a bare challenge
+     * @param errorDescription human-readable detail for {@code error}, or {@code null}
+     */
+    public static String challenge(String scheme, LwsConfiguration config, String error, String errorDescription) {
+        StringBuilder sb = new StringBuilder(scheme).append(' ');
+        String as = config.primaryAuthorizationServer();
+        if (as != null && !scheme.equalsIgnoreCase("SAML2")) {
+            sb.append("as_uri=\"").append(quote(as)).append("\", ");
+        }
+        sb.append("realm=\"").append(quote(config.storageIri())).append('"');
+        if (scheme.equalsIgnoreCase("DPoP")) {
+            sb.append(", algs=\"").append(DPOP_ALGS).append('"');
+        }
+        if (error != null) {
+            sb.append(", error=\"").append(quote(error)).append('"');
+            if (errorDescription != null) {
+                sb.append(", error_description=\"").append(quote(errorDescription)).append('"');
+            }
+        }
+        return sb.toString();
+    }
+
+    /** Escape a value for an RFC 9110 quoted-string: backslash and double quote, nothing else. */
+    private static String quote(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    /**
+     * Add the link from a Storage Resource to its storage: {@code rel="https://www.w3.org/ns/lws#storage"}
+     * with the canonical storage URI as target. lws10-core requires it on every {@code GET} and
+     * {@code HEAD} response for a Storage Resource, and recommends it on a {@code 401}.
+     */
+    public static void addStorageLink(HttpServletResponse response, LwsConfiguration config) {
+        response.addHeader("Link", "<" + config.storageIri() + ">; rel=\"" + REL_STORAGE + "\"");
     }
 
     /** Content type for structured error responses (RFC 9457). */
@@ -170,11 +236,14 @@ public final class HttpSupport {
             case 403 -> "Forbidden";
             case 404 -> "Not Found";
             case 405 -> "Method Not Allowed";
+            case 406 -> "Not Acceptable";
             case 409 -> "Conflict";
+            case 410 -> "Gone";
             case 412 -> "Precondition Failed";
             case 413 -> "Content Too Large";
             case 415 -> "Unsupported Media Type";
             case 416 -> "Range Not Satisfiable";
+            case 422 -> "Unprocessable Content";
             case 428 -> "Precondition Required";
             case 429 -> "Too Many Requests";
             case 500 -> "Internal Server Error";
@@ -362,7 +431,7 @@ public final class HttpSupport {
         if (meta.modified() != null) {
             response.setHeader("Last-Modified", httpDate(meta.modified()));
         }
-        response.addHeader("Link", "<" + config.storageDescriptionIri() + ">; rel=\"" + REL_STORAGE_DESCRIPTION + "\"");
+        addStorageLink(response, config);
         // Metadata discovery (lws10-core): the parent container (rel="up", non-root only) and the
         // resource's linkset (metadata) resource.
         if (meta.parentIri() != null) {

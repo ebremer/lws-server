@@ -15,6 +15,13 @@ import com.ebremer.lws.server.core.LwsPrincipal;
  * {@code client_id} are all the same {@code did:key:} URI; the verification key is extracted
  * directly from that identifier, so no network lookup is required.
  *
+ * <p><b>Deprecated suite.</b> The did:key suite was discontinued on 18 September 2026: the
+ * self-signed controlled identifier suite subsumes it, resolving a {@code did:key} subject to its DID
+ * document and selecting the verification method the JWT's {@code kid} names. {@link SsiCidValidator}
+ * now validates every did:key credential that carries a {@code kid}; this class is reached only for
+ * one that does not, so credentials minted before the change keep working. It is no longer
+ * advertised in the storage description.
+ *
  * @author Erich Bremer
  */
 public final class DidKeyValidator implements CredentialValidator {
