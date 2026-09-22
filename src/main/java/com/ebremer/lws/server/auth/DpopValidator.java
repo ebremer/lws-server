@@ -166,6 +166,24 @@ public final class DpopValidator {
      * @return the proof key's JWK thumbprint if valid, otherwise empty
      */
     public Optional<String> verifyProof(String htm, String htu, String proof, String accessToken) {
+        if (accessToken == null) {
+            return Optional.empty(); // a proof presented to a resource must be bound to its token
+        }
+        return verify(htm, htu, proof, accessToken);
+    }
+
+    /**
+     * Verify a DPoP proof sent to the token endpoint (RFC 9449 §5), where there is no access token
+     * yet and so no {@code ath} to check. The caller claims the proof's {@code jti} with
+     * {@link #claimProof} once the request has otherwise succeeded, as for a resource request.
+     *
+     * @return the proof key's JWK thumbprint if valid, otherwise empty
+     */
+    public Optional<String> verifyTokenRequestProof(String htm, String htu, String proof) {
+        return verify(htm, htu, proof, null);
+    }
+
+    private Optional<String> verify(String htm, String htu, String proof, String accessToken) {
         try {
             SignedJWT jwt = SignedJWT.parse(proof);
             JWSHeader header = jwt.getHeader();
@@ -199,9 +217,11 @@ public final class DpopValidator {
             if (claims.getJWTID() == null) {
                 return Optional.empty(); // a proof with no jti cannot be replay-protected
             }
-            String ath = claims.getStringClaim("ath");
-            if (ath == null || !ath.equals(sha256Base64Url(accessToken))) {
-                return Optional.empty(); // proof not bound to this access token
+            if (accessToken != null) {
+                String ath = claims.getStringClaim("ath");
+                if (ath == null || !ath.equals(sha256Base64Url(accessToken))) {
+                    return Optional.empty(); // proof not bound to this access token
+                }
             }
             return Optional.of(jwk.computeThumbprint().toString());
         } catch (Exception e) {

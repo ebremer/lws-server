@@ -298,7 +298,12 @@ public final class SubscriptionService {
     }
 
     /**
-     * An RDF representation of a single subscription, for GET on a subscription resource.
+     * The current state of a subscription as {@code application/lws+json}: what a successful
+     * creation returns and what {@code GET} on the subscription resource returns
+     * (lws10-notifications-webhook). {@code type} and {@code subscription} are the fields the suite
+     * requires; {@code expires} is included whenever the subscription has one — which, under
+     * {@code lws.subscriptions.max-lifetime-seconds}, it always does, so a subscriber learns the
+     * expiry the server actually applied rather than the one it asked for.
      *
      * <p>Delivery bookkeeping is deliberately withheld: {@code failureCount} reports whether an
      * arbitrary client-chosen URL answered, which would turn delivery into a readable probe of the
@@ -306,9 +311,46 @@ public final class SubscriptionService {
      * subscription was deactivated — but it only flips after
      * {@code lws.webhook.max-consecutive-failures}, so it carries no per-request signal.
      */
+    public JsonObject describeJson(Subscription subscription) {
+        jakarta.json.JsonArrayBuilder topics = jakarta.json.Json.createArrayBuilder();
+        subscription.topics().forEach(topics::add);
+        jakarta.json.JsonObjectBuilder doc = jakarta.json.Json.createObjectBuilder()
+                .add("@context", jakarta.json.Json.createArrayBuilder().add(LWS.JSON_CONTEXT))
+                .add("id", subscription.id())
+                .add("type", "WebhookSubscription")
+                .add("subscription", subscription.id())
+                .add("topic", topics)
+                .add("inbox", subscription.inbox());
+        if (subscription.expires() != null) {
+            doc.add("expires", subscription.expires().toString());
+        }
+        return doc.add("active", subscription.active()).build();
+    }
+
+    /**
+     * The same state as RDF, for a client that asks for an RDF serialization: {@link #describeJson}
+     * read through the LWS vocabulary, where {@code inbox} is {@code ldp:inbox} and {@code expires}
+     * is {@code schema:expires}. The graph the subscriptions are <em>stored</em> in keeps its own
+     * administrative terms; this is the published view of it.
+     */
     public Model describe(Subscription subscription) {
-        Model m = toModel(subscription);
-        m.removeAll(m.getResource(subscription.id()), LWS.failureCount, null);
+        Model m = ModelFactory.createDefaultModel();
+        m.setNsPrefix(LWS.PREFIX, LWS.NS);
+        m.setNsPrefix("ldp", "http://www.w3.org/ns/ldp#");
+        m.setNsPrefix("schema", "https://schema.org/");
+        Resource r = m.createResource(subscription.id());
+        r.addProperty(RDF.type, LWS.WebhookSubscription);
+        r.addProperty(LWS.subscription, m.createTypedLiteral(subscription.id(), XSDDatatype.XSDanyURI));
+        for (String topic : subscription.topics()) {
+            r.addProperty(LWS.topic, m.createTypedLiteral(topic, XSDDatatype.XSDanyURI));
+        }
+        r.addProperty(m.createProperty("http://www.w3.org/ns/ldp#inbox"),
+                m.createTypedLiteral(subscription.inbox(), XSDDatatype.XSDanyURI));
+        if (subscription.expires() != null) {
+            r.addProperty(m.createProperty("https://schema.org/expires"),
+                    m.createTypedLiteral(subscription.expires().toString(), XSDDatatype.XSDdateTime));
+        }
+        r.addLiteral(LWS.active, subscription.active());
         return m;
     }
 

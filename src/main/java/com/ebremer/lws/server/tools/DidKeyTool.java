@@ -18,12 +18,16 @@ import com.nimbusds.jwt.JWTClaimsSet;
 import com.ebremer.lws.server.auth.Base58;
 
 /**
- * Command-line helper to bootstrap a storage owner using the self-signed {@code did:key}
- * authentication suite — no identity provider required.
+ * Command-line helper to bootstrap a storage owner with a {@code did:key} identity — no identity
+ * provider required.
  *
  * <p>It generates (or reuses) an Ed25519 key and prints: the {@code did:key} to put in
- * {@code lws.owners}, the private key seed (to re-mint tokens later), and a ready-to-use Bearer
- * token (a self-issued JWT with {@code sub}=={@code iss}=={@code client_id}==the DID).
+ * {@code lws.owners}, the private key seed (to re-mint tokens later), and a ready-to-use credential:
+ * a self-issued JWT with {@code sub}=={@code iss}=={@code client_id}==the DID and a {@code kid}
+ * naming the verification method of the DID's document, {@code <did>#<multibase>}. That is a
+ * credential of the self-signed controlled identifier suite, which covers {@code did:key} subjects
+ * since the self-signed did:key suite was discontinued; it can be presented to the storage directly,
+ * or exchanged at the token endpoint for an access token (lws10-core).
  *
  * <pre>
  *   java -cp lws-server.jar com.ebremer.lws.server.tools.DidKeyTool [--key &lt;seed&gt;] [--ttl &lt;seconds&gt;] [--audience &lt;aud&gt;]
@@ -57,10 +61,14 @@ public final class DidKeyTool {
         multicodec[0] = (byte) 0xed;
         multicodec[1] = 0x01;
         System.arraycopy(pub, 0, multicodec, 2, pub.length);
-        String did = "did:key:z" + Base58.encode(multicodec);
+        String multibase = "z" + Base58.encode(multicodec);
+        String did = "did:key:" + multibase;
 
         Instant now = Instant.now();
-        JWSHeader header = new JWSHeader.Builder(JWSAlgorithm.EdDSA).type(JOSEObjectType.JWT).build();
+        // The kid names the one verification method a did:key document has: the self-signed CID
+        // suite requires it, and CID 1.0 §3.3 retrieves the key by it.
+        JWSHeader header = new JWSHeader.Builder(JWSAlgorithm.EdDSA).type(JOSEObjectType.JWT)
+                .keyID(did + "#" + multibase).build();
         JWTClaimsSet.Builder claims = new JWTClaimsSet.Builder()
                 .subject(did).issuer(did).claim("client_id", did)
                 .issueTime(Date.from(now))
@@ -112,7 +120,8 @@ public final class DidKeyTool {
         System.out.println("Private key seed (base64url) - keep secret; pass with --key to re-mint:");
         System.out.println("  " + m.privateKeySeedBase64Url());
         System.out.println();
-        System.out.println("Bearer token (valid " + ttl + "s) - use as 'Authorization: Bearer <token>':");
+        System.out.println("Credential (valid " + ttl + "s) - use as 'Authorization: Bearer <token>', or exchange it");
+        System.out.println("for an access token (subject_token_type urn:ietf:params:oauth:token-type:jwt):");
         System.out.println("  " + m.token());
     }
 }

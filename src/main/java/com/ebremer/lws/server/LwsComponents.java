@@ -7,7 +7,9 @@ import java.util.concurrent.TimeUnit;
 import org.pac4j.core.config.Config;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.ebremer.lws.server.auth.AccessTokenValidator;
 import com.ebremer.lws.server.auth.AudiencePolicy;
+import com.ebremer.lws.server.auth.CredentialValidator;
 import com.ebremer.lws.server.auth.AuthenticationFilter;
 import com.ebremer.lws.server.auth.DefaultAccessPolicy;
 import com.ebremer.lws.server.auth.DidKeyValidator;
@@ -36,6 +38,9 @@ import com.ebremer.lws.server.core.ResourceRegistry;
 import com.ebremer.lws.server.core.ResourceService;
 import com.ebremer.lws.server.core.SearchIndexService;
 import com.ebremer.lws.server.core.StorageDescriptionService;
+import com.ebremer.lws.server.http.StorageDescriptionResponder;
+import com.ebremer.lws.server.oauth.AccessTokenKeys;
+import com.ebremer.lws.server.oauth.TokenExchange;
 import com.ebremer.lws.server.notifications.NotificationEmitter;
 import com.ebremer.lws.server.notifications.SubscriptionService;
 import com.ebremer.lws.server.notifications.WebhookDispatcher;
@@ -67,6 +72,9 @@ public final class LwsComponents implements AutoCloseable {
     private final WacAclService aclService; // nullable: only when access-control = WAC
     private final ResourceService resourceService;
     private final StorageDescriptionService storageDescriptionService;
+    private final StorageDescriptionResponder storageDescriptionResponder;
+    private final AccessTokenKeys accessTokenKeys; // nullable: the embedded authorization server is off
+    private final TokenExchange tokenExchange;     // nullable: likewise
     private final SearchIndexService searchIndexService;
     private final LinksetService linksetService;
     private final AccessService accessService;
@@ -128,7 +136,13 @@ public final class LwsComponents implements AutoCloseable {
         Authorizer authorizer = config.accessRequestsEnabled()
                 ? new GrantAuthorizer(baseAuthorizer, accessService, config, clock) : baseAuthorizer;
         this.resourceService = new ResourceService(rdfStore, binaryStore, registry, authorizer, config, clock);
-        this.storageDescriptionService = new StorageDescriptionService(config);
+        // The webhook key first: the storage description publishes it as the verification method
+        // a delivery's signature names (lws10-notifications-webhook).
+        this.webhookKeys = new WebhookKeys(config.keysDir());
+        this.storageDescriptionService = new StorageDescriptionService(config, java.util.List.of(
+                new StorageDescriptionService.VerificationKey(webhookKeys.keyId(), webhookKeys.publicJwk())));
+        this.storageDescriptionResponder =
+                new StorageDescriptionResponder(storageDescriptionService, config, clock.instant());
         this.searchIndexService = new SearchIndexService(rdfStore, authorizer);
         if (config.searchIndexEnabled()) {
             // Maintain the search service's derived type index incrementally as resources change.
@@ -136,6 +150,9 @@ public final class LwsComponents implements AutoCloseable {
         }
         this.linksetService = new LinksetService(rdfStore, resourceService, config);
         this.resourceService.addDeleteCleanup(linksetService); // drop a resource's metadata with the delete
+        // A grant's `type` constraint reads the types a target's metadata declares, which are
+        // advertised in its Link headers alongside the structural ones.
+        this.accessService.setLinksets(linksetService);
         if (config.searchIndexEnabled()) {
             // A client may declare its resource's types in that resource's own metadata, which
             // lws10-searchindex treats as the preferred source; the index reads them, and is told
@@ -153,15 +170,45 @@ public final class LwsComponents implements AutoCloseable {
         DocumentLoader documentLoader = new HttpDocumentLoader(fetchPolicy);
         AudiencePolicy audiencePolicy = AudiencePolicy.from(config);
         long tokenMaxLifetimeMs = config.tokenMaxLifetimeMs();
+        // LWS authorization (lws10-core): the embedded authorization server's signing key, and the
+        // validator for the access tokens this storage accepts — its own server's, and those of any
+        // external server it is configured to trust.
+        this.accessTokenKeys = config.oauthEnabled() ? new AccessTokenKeys(config.keysDir()) : null;
+        AccessTokenValidator accessTokens = config.oauthEnabled() || !config.oauthTrustedIssuers().isEmpty()
+                ? new AccessTokenValidator(java.util.Set.of(config.storageIri(), config.baseUri()),
+                        config.oauthEnabled() ? config.oauthIssuer() : null,
+                        accessTokenKeys == null ? null : accessTokenKeys.publicJwkSet(),
+                        config.oauthTrustedIssuers(), documentLoader, fetchPolicy)
+                : null;
         this.credentialValidator = new LwsCredentialValidator(
                 new LwsOpenIdValidator(fetchPolicy, documentLoader, audiencePolicy),
                 new SsiCidValidator(documentLoader, audiencePolicy, tokenMaxLifetimeMs,
                         config.ssiCidDocumentCacheSeconds(), config.ssiCidDocumentFailureCacheSeconds()),
-                new DidKeyValidator(audiencePolicy, tokenMaxLifetimeMs), saml);
+                new DidKeyValidator(audiencePolicy, tokenMaxLifetimeMs), saml,
+                accessTokens, config.oauthAcceptCredentials());
         this.dpopValidator = new DpopValidator(
                 config.dpopRequireNonce() ? new DpopNonceService() : null, config.dpopJtiCacheSize());
 
-        this.webhookKeys = new WebhookKeys(config.keysDir());
+        if (config.oauthEnabled()) {
+            // The token endpoint validates credentials presented to the AUTHORIZATION SERVER, so
+            // their audience must name it: its issuer or its token endpoint, alongside whatever
+            // this storage already accepts. The suites are otherwise the ones the storage uses.
+            java.util.Set<String> asAudiences = new java.util.LinkedHashSet<>(config.acceptedAudiences());
+            asAudiences.add(config.oauthIssuer());
+            asAudiences.add(config.storageIri());
+            asAudiences.add(config.tokenEndpointIri());
+            AudiencePolicy asAudience = new AudiencePolicy(asAudiences, config.audienceRequired());
+            SsiCidValidator selfSigned = new SsiCidValidator(documentLoader, asAudience, tokenMaxLifetimeMs,
+                    config.ssiCidDocumentCacheSeconds(), config.ssiCidDocumentFailureCacheSeconds());
+            DidKeyValidator legacyDidKey = new DidKeyValidator(asAudience, tokenMaxLifetimeMs);
+            CredentialValidator selfSignedOrLegacy = credential -> legacyDidKeyCredential(credential)
+                    ? legacyDidKey.validate(credential) : selfSigned.validate(credential);
+            this.tokenExchange = new TokenExchange(config, accessTokenKeys,
+                    new LwsOpenIdValidator(fetchPolicy, documentLoader, asAudience)::validate,
+                    selfSignedOrLegacy, saml == null ? null : saml::validate, clock);
+        } else {
+            this.tokenExchange = null;
+        }
         this.subscriptionService =
                 new SubscriptionService(rdfStore, resourceService, config, clock, deliveryPolicy);
         this.webhookDispatcher =
@@ -290,6 +337,47 @@ public final class LwsComponents implements AutoCloseable {
 
     public WebhookKeys webhookKeys() {
         return webhookKeys;
+    }
+
+    /** Writes the storage description, for its own address and for the storage URI. */
+    public StorageDescriptionResponder storageDescriptionResponder() {
+        return storageDescriptionResponder;
+    }
+
+    /** The embedded authorization server's token exchange, or {@code null} when it is off. */
+    public TokenExchange tokenExchange() {
+        return tokenExchange;
+    }
+
+    public DpopValidator dpopValidator() {
+        return dpopValidator;
+    }
+
+    /**
+     * The JWK set published at the JWKS endpoint: the access-token signing key, when the embedded
+     * authorization server is on, and the webhook signing key.
+     */
+    public String jwkSetJson() {
+        jakarta.json.JsonArrayBuilder keys = jakarta.json.Json.createArrayBuilder();
+        if (accessTokenKeys != null) {
+            try (jakarta.json.JsonReader reader = jakarta.json.Json.createReader(
+                    new java.io.StringReader(accessTokenKeys.publicJwk().toJSONString()))) {
+                keys.add(reader.readObject());
+            }
+        }
+        keys.add(webhookKeys.publicJwk());
+        return jakarta.json.Json.createObjectBuilder().add("keys", keys).build().toString();
+    }
+
+    /** A did:key credential that names no {@code kid}: one minted for the discontinued did:key suite. */
+    private static boolean legacyDidKeyCredential(String credential) {
+        try {
+            com.nimbusds.jwt.SignedJWT jwt = com.nimbusds.jwt.SignedJWT.parse(credential);
+            String sub = jwt.getJWTClaimsSet().getSubject();
+            return sub != null && sub.startsWith("did:key:") && jwt.getHeader().getKeyID() == null;
+        } catch (java.text.ParseException e) {
+            return false;
+        }
     }
 
     public SubscriptionService subscriptionService() {

@@ -6,11 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.StringReader;
 import java.net.ServerSocket;
 import java.net.URI;
-import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashSet;
@@ -94,10 +92,10 @@ class SearchIndexAuthzTest {
     @Test
     void ownerSeesPrivateTypesAndResources() {
         // Owner: the type and all three resources are visible (totalItems counts the full authorized view).
-        assertEquals(3, getLws(baseUrl + SEARCH + "?type=" + enc(SECRET), ownerToken).getInt("totalItems"));
+        assertEquals(3, search(1, ownerToken).getInt("totalItems"));
         Set<String> ids = new HashSet<>();
-        ids.addAll(ids(getLws(baseUrl + SEARCH + "?type=" + enc(SECRET) + "&page=1", ownerToken)));
-        ids.addAll(ids(getLws(baseUrl + SEARCH + "?type=" + enc(SECRET) + "&page=2", ownerToken)));
+        ids.addAll(ids(search(1, ownerToken)));
+        ids.addAll(ids(search(2, ownerToken)));
         assertEquals(Set.of(baseUrl + "/s1", baseUrl + "/s2", baseUrl + "/s3"), ids);
         assertTrue(indexTypes(ownerToken).contains(SECRET), "owner type index should include the private type");
     }
@@ -106,27 +104,35 @@ class SearchIndexAuthzTest {
     void anonymousCannotDiscoverPrivateTypesOrResources() {
         // Anonymous: no readable resources, so the search and the index are both empty -- the
         // existence of the resources and even of the type itself is not disclosed.
-        assertEquals(0, getLws(baseUrl + SEARCH + "?type=" + enc(SECRET), null).getInt("totalItems"));
+        assertEquals(0, search(1, null).getInt("totalItems"));
         assertEquals(0, getLws(baseUrl + INDEX, null).getInt("totalItems"));
         assertFalse(indexTypes(null).contains(SECRET), "anonymous must not learn the private type exists");
     }
 
     @Test
     void paginationExposesLinkRelations() throws Exception {
-        HttpResponse<String> page1 = raw(baseUrl + SEARCH + "?type=" + enc(SECRET) + "&page=1", ownerToken);
+        HttpResponse<String> page1 = rawQuery(1, ownerToken);
         assertEquals(200, page1.statusCode());
         assertEquals(2, items(page1).size());
         assertTrue(hasRel(page1, "next"), "page 1 should link to next");
         assertTrue(hasRel(page1, "last"), "page 1 should link to last");
 
-        HttpResponse<String> page2 = raw(baseUrl + SEARCH + "?type=" + enc(SECRET) + "&page=2", ownerToken);
+        // The next page is reached by dereferencing the link, as lws10-index says: it is opaque.
+        String next = link(page1, "next");
+        HttpResponse<String> page2 = raw(next, ownerToken);
         assertEquals(200, page2.statusCode());
         assertEquals(1, items(page2).size());
         assertTrue(hasRel(page2, "prev"), "page 2 should link to prev");
         assertTrue(hasRel(page2, "first"), "page 2 should link to first");
 
+        // The link carries the filter, not the authorization: dereferenced anonymously it is the
+        // anonymous client's view, which has nothing in it — so no second page either.
+        assertEquals(0, Json.createReader(new StringReader(raw(link(page1, "first"), null).body())).readObject()
+                .getInt("totalItems"));
+        assertEquals(404, raw(next, null).statusCode());
+
         // A page past the last is a stale/unknown pagination reference.
-        assertEquals(404, raw(baseUrl + SEARCH + "?type=" + enc(SECRET) + "&page=3", ownerToken).statusCode());
+        assertEquals(404, raw(next.replace("page=2", "page=3"), ownerToken).statusCode());
     }
 
     // ----- helpers -----
@@ -181,6 +187,33 @@ class SearchIndexAuthzTest {
         return all;
     }
 
+    /** A type search for the private type, page {@code page}: an HTTP QUERY (lws10-index). */
+    private static HttpResponse<String> rawQuery(int page, String token) throws Exception {
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(baseUrl + SEARCH + "?page=" + page))
+                .header("Content-Type", "application/lws-query+json")
+                .method("QUERY", HttpRequest.BodyPublishers.ofString("{\"type\":[\"" + SECRET + "\"]}"));
+        if (token != null) {
+            b.header("Authorization", "Bearer " + token);
+        }
+        return http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static JsonObject search(int page, String token) {
+        try {
+            HttpResponse<String> r = rawQuery(page, token);
+            assertEquals(200, r.statusCode(), "QUERY page " + page + " -> " + r.statusCode() + " " + r.body());
+            return Json.createReader(new StringReader(r.body())).readObject();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static String link(HttpResponse<String> r, String rel) {
+        String header = r.headers().allValues("Link").stream()
+                .filter(h -> h.contains("rel=\"" + rel + "\"")).findFirst().orElseThrow();
+        return header.substring(1, header.indexOf('>'));
+    }
+
     private static Set<String> items(HttpResponse<String> r) {
         return ids(Json.createReader(new StringReader(r.body())).readObject());
     }
@@ -195,10 +228,6 @@ class SearchIndexAuthzTest {
 
     private static boolean hasRel(HttpResponse<String> r, String rel) {
         return r.headers().allValues("Link").stream().anyMatch(h -> h.contains("rel=\"" + rel + "\""));
-    }
-
-    private static String enc(String value) {
-        return URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 
     private static int freePort() throws Exception {

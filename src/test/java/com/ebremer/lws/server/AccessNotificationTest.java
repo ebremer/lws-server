@@ -123,7 +123,8 @@ class AccessNotificationTest {
         String grantId = create("/.lws/access-grants", grant, ownerToken);
 
         Received r = await(n -> n.is("AccessGrant") && n.is(grantId));
-        assertTrue(r.contentType().startsWith("application/ld+json"), r.contentType());
+        // Deliveries are application/lws+json (lws10-notifications-webhook).
+        assertTrue(r.contentType().startsWith("application/lws+json"), r.contentType());
         assertTrue(r.is("Notification") && r.is("Create"));
         // Signed delivery (RFC 9421) with a matching Content-Digest (RFC 9530).
         assertTrue(r.signatureInput() != null && r.signature() != null, "signed delivery");

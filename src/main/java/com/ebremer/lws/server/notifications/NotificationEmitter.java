@@ -2,19 +2,21 @@ package com.ebremer.lws.server.notifications;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 import jakarta.json.Json;
-import jakarta.json.JsonArray;
+import jakarta.json.JsonArrayBuilder;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonObjectBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.ebremer.lws.server.LwsConfiguration;
 import com.ebremer.lws.server.core.ActivityKind;
+import com.ebremer.lws.server.core.Iris;
 import com.ebremer.lws.server.core.LwsPrincipal;
 import com.ebremer.lws.server.core.RequestContext;
 import com.ebremer.lws.server.core.ResourceEvent;
@@ -24,17 +26,27 @@ import com.ebremer.lws.server.core.ResourceType;
 import com.ebremer.lws.server.vocab.LWS;
 
 /**
- * Turns {@link ResourceEvent}s into LWS notification envelopes (a {@code lws:Notification} JSON-LD
- * document wrapping an Activity Streams 2.0 {@code Create}/{@code Update}/{@code Delete} activity)
- * and dispatches them to every subscription that covers the resource and whose subscriber is
- * authorized to read it.
+ * Turns {@link ResourceEvent}s into LWS notifications and dispatches them to every subscription that
+ * covers the resource and whose subscriber is authorized to read it.
+ *
+ * <p>A notification is the lws10-core Notification Data Model: an {@code application/lws+json}
+ * envelope of type {@code Notification} carrying the {@code storage} it concerns and one Activity
+ * Streams 2.0 {@code activity} — {@code Create}, {@code Update} or {@code Delete} — whose
+ * {@code type} and whose {@code object}'s {@code type} are arrays, whose {@code published} is an
+ * RFC 3339 timestamp, and which names the container the resource was added to ({@code target}, on a
+ * {@code Create}) or removed from ({@code origin}, on a {@code Delete}). The {@code actor} is
+ * omitted unless {@code lws.notifications.include-actor} is set, as the core's privacy
+ * considerations advise.
  *
  * @author Erich Bremer
  */
 public final class NotificationEmitter implements ResourceEventListener {
 
     private static final Logger log = LoggerFactory.getLogger(NotificationEmitter.class);
-    private static final String CONTENT_TYPE = "application/ld+json";
+    /** Notification deliveries are {@code application/lws+json} (lws10-notifications-webhook). */
+    private static final String CONTENT_TYPE = "application/lws+json";
+    /** The envelope's context: the LWS context first, then Activity Streams (lws10-core). */
+    private static final String ACTIVITY_STREAMS_CONTEXT = "https://www.w3.org/ns/activitystreams";
 
     private final SubscriptionService subscriptions;
     private final WebhookDispatcher dispatcher;
@@ -134,54 +146,70 @@ public final class NotificationEmitter implements ResourceEventListener {
     }
 
     /**
-     * Deliver an access-event notification (lws10-core access requests): a {@code Create} activity
-     * about a newly created access request/grant, sent to the {@code inbox} the document carries.
+     * Deliver an access-event notification (lws10-core, Access Requests and Grants): a
+     * {@code Create} activity about a newly created access request or grant, whose {@code target}
+     * is the endpoint it was created in, sent to an inbox the document or the configuration names.
      */
     public void notifyAccessCreated(String inbox, String objectIri, boolean grant, String actorWebId, Instant when) {
-        byte[] body = buildEnvelope(objectIri, grant ? "lws:AccessGrant" : "lws:AccessRequest",
-                "Create", actorWebId, when.toString());
+        String endpoint = grant ? config.accessGrantsEndpointIri() : config.accessRequestsEndpointIri();
+        byte[] body = buildEnvelope(objectIri, List.of("DataResource", grant ? "AccessGrant" : "AccessRequest"),
+                "Create", endpoint, null, actorWebId, when);
         dispatcher.deliverTo(inbox, body, CONTENT_TYPE);
     }
 
     private byte[] buildNotification(ResourceEvent event) {
-        String objectType = event.type() == ResourceType.CONTAINER ? "lws:Container" : "lws:DataResource";
-        return buildEnvelope(event.iri(), objectType, capitalize(event.kind().name()),
-                event.actorWebId(), event.when().toString());
+        String objectType = event.type() == ResourceType.CONTAINER ? "Container" : "DataResource";
+        String parent = parentOf(event.iri());
+        return buildEnvelope(event.iri(), List.of(objectType), capitalize(event.kind().name()),
+                event.kind() == ActivityKind.CREATE ? parent : null,
+                event.kind() == ActivityKind.DELETE ? parent : null,
+                event.actorWebId(), event.when());
     }
 
-    /** Build a {@code lws:Notification} JSON-LD envelope wrapping a single AS2 activity. */
-    private byte[] buildEnvelope(String objectIri, String objectType, String activityType,
-            String actorWebId, String published) {
-        JsonObject context = Json.createObjectBuilder()
-                .add("lws", LWS.NS)
-                .add("storage", Json.createObjectBuilder().add("@id", "lws:storage").add("@type", "@id"))
-                .add("activity", "lws:activity")
-                .add("Notification", "lws:Notification")
-                .build();
-        JsonArray contextArray = Json.createArrayBuilder()
-                .add("https://www.w3.org/ns/activitystreams")
-                .add(context)
-                .build();
+    /** The container a resource belongs to, or {@code null} for the root and foreign IRIs. */
+    private String parentOf(String iri) {
+        String path = Iris.toPath(config.baseUri(), iri);
+        String parent = path == null ? null : Iris.parentPath(path);
+        return parent == null ? null : Iris.toIri(config.baseUri(), parent);
+    }
 
+    /**
+     * Build a notification envelope wrapping a single activity.
+     *
+     * @param target the container the resource was added to (a {@code Create}), or {@code null}
+     * @param origin the container the resource was removed from (a {@code Delete}), or {@code null}
+     */
+    private byte[] buildEnvelope(String objectIri, List<String> objectTypes, String activityType,
+            String target, String origin, String actorWebId, Instant when) {
+        JsonArrayBuilder types = Json.createArrayBuilder();
+        objectTypes.forEach(types::add);
         JsonObject object = Json.createObjectBuilder()
                 .add("id", objectIri)
-                .add("type", objectType)
+                .add("type", types)
                 .build();
 
         JsonObjectBuilder activity = Json.createObjectBuilder()
                 .add("id", "urn:uuid:" + UUID.randomUUID())
-                .add("type", activityType)
-                .add("published", published)
+                .add("type", Json.createArrayBuilder().add(activityType))
                 .add("object", object);
-        if (actorWebId != null) {
+        if (target != null) {
+            activity.add("target", target);
+        }
+        if (origin != null) {
+            activity.add("origin", origin);
+        }
+        // Who made the change is withheld by default: lws10-core says the actor SHOULD be omitted
+        // and MAY be made configurable, because it tells every subscriber who edits what.
+        if (actorWebId != null && config.notificationsIncludeActor()) {
             activity.add("actor", actorWebId);
         }
+        activity.add("published", when.truncatedTo(ChronoUnit.MILLIS).toString());
 
         JsonObject notification = Json.createObjectBuilder()
-                .add("@context", contextArray)
+                .add("@context", Json.createArrayBuilder().add(LWS.JSON_CONTEXT).add(ACTIVITY_STREAMS_CONTEXT))
                 .add("type", "Notification")
-                .add("storage", config.storageRootIri())
-                .add("activity", Json.createArrayBuilder().add(activity).build())
+                .add("storage", config.storageIri())
+                .add("activity", activity)
                 .build();
         return notification.toString().getBytes(StandardCharsets.UTF_8);
     }

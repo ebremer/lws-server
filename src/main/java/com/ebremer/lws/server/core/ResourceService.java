@@ -352,7 +352,8 @@ public final class ResourceService {
         m.setNsPrefix("dcterms", DCTerms.getURI());
         Resource c = m.createResource(container.iri());
         c.addProperty(RDF.type, LWS.Container);
-        c.addProperty(LWS.storageDescription, m.createResource(config.storageDescriptionIri()));
+        c.addProperty(LWS.storage, m.createResource(config.storageIri()));
+        c.addLiteral(LWS.totalItems, (long) children.size());
         if (container.modified() != null) {
             c.addProperty(DCTerms.modified,
                     m.createTypedLiteral(container.modified().toString(), XSDDatatype.XSDdateTime));

@@ -113,6 +113,19 @@ public final class LwsConfiguration {
     private final boolean audienceRequired;
     private final long tokenMaxLifetimeMs;
 
+    // LWS authorization (lws10-core, Authorization): the OAuth 2.0 access tokens this storage
+    // accepts, the authorization server embedded in it, and whether an authentication credential
+    // presented directly — this server's behaviour before the access-token baseline — is still
+    // honoured as an additional mechanism.
+    private final boolean oauthEnabled;
+    private final long oauthAccessTokenLifetimeSeconds;
+    private final Set<String> oauthTrustedIssuers;
+    private final boolean oauthAcceptCredentials;
+
+    // Notifications: whether the envelope names the agent that made the change (lws10-core says the
+    // actor SHOULD be omitted by default and MAY be configurable).
+    private final boolean notificationsIncludeActor;
+
     // SPARQL Update: hosts that LOAD/SERVICE may fetch from (empty = none; SSRF guard).
     private final Set<String> sparqlUpdateAllowedHosts;
 
@@ -258,6 +271,23 @@ public final class LwsConfiguration {
         // Cap at ten years so the millisecond conversion cannot overflow.
         this.tokenMaxLifetimeMs =
                 getLong(p, "lws.token.max-lifetime-seconds", 3600, 0, 315_360_000L) * 1000L;
+
+        this.oauthEnabled = getBoolean(p, "lws.oauth.enabled", true);
+        // lws10-core RECOMMENDS 300 seconds or less; an hour is the most this server will mint.
+        this.oauthAccessTokenLifetimeSeconds =
+                getLong(p, "lws.oauth.access-token-lifetime-seconds", 300, 1, 3600);
+        Set<String> issuers = new LinkedHashSet<>();
+        for (String issuer : parseSet(get(p, "lws.oauth.trusted-issuers", ""))) {
+            URI parsed = requireUri("lws.oauth.trusted-issuers", issuer);
+            if (parsed.getRawQuery() != null || parsed.getRawFragment() != null) {
+                throw error("lws.oauth.trusted-issuers", issuer,
+                        "an issuer identifier with no query or fragment (RFC 8414 section 2)");
+            }
+            issuers.add(issuer);
+        }
+        this.oauthTrustedIssuers = issuers;
+        this.oauthAcceptCredentials = getBoolean(p, "lws.oauth.accept-authentication-credentials", true);
+        this.notificationsIncludeActor = getBoolean(p, "lws.notifications.include-actor", false);
         Set<String> loadHosts = new LinkedHashSet<>();
         for (String host : parseSet(get(p, "lws.sparql-update.allowed-hosts", ""))) {
             loadHosts.add(host.toLowerCase(Locale.ROOT));
@@ -382,6 +412,13 @@ public final class LwsConfiguration {
         if (devOpen && !isLoopbackBaseUri()) {
             log.warn("lws.dev.open=true with a non-loopback lws.base-uri ({}): development "
                     + "authorization is reachable from the network.", baseUri);
+        }
+        if (!oauthEnabled && oauthTrustedIssuers.isEmpty()) {
+            log.warn("lws.oauth.enabled=false and lws.oauth.trusted-issuers is empty: this storage "
+                    + "names no authorization server, so its 401 challenges cannot carry the as_uri "
+                    + "lws10-core requires and no client can obtain an access token for it.{}",
+                    oauthAcceptCredentials ? " Authentication credentials presented directly are "
+                            + "still accepted (lws.oauth.accept-authentication-credentials)." : "");
         }
         validateCors();
         validateTlsPosture();
@@ -817,6 +854,20 @@ public final class LwsConfiguration {
         return baseUri + "/";
     }
 
+    /**
+     * The canonical URI of the storage (lws10-core, Discovery): the {@code id} of the storage
+     * description, the target of every {@code rel="https://www.w3.org/ns/lws#storage"} link, the
+     * {@code realm} of this storage's challenges and the one {@code aud} its access tokens carry.
+     *
+     * <p>It is the root container's URI, as lws10-core permits, because the realm has to logically
+     * contain every resource a client sends a token to — a URI no resource path starts with could
+     * not — and because it is the value this server's access grants and notifications have always
+     * carried as {@code storage}.
+     */
+    public String storageIri() {
+        return storageRootIri();
+    }
+
     public Path dataDir() {
         return dataDir;
     }
@@ -866,6 +917,14 @@ public final class LwsConfiguration {
         return systemPrefix + "/access-grants";
     }
 
+    /** The OAuth 2.0 token endpoint of the embedded authorization server (RFC 8693 token exchange). */
+    public String tokenPath() {
+        return systemPrefix + "/token";
+    }
+
+    /** Where the embedded authorization server publishes its metadata (lws10-core, RFC 8414). */
+    public static final String AS_METADATA_PATH = "/.well-known/lws-configuration";
+
     public String storageDescriptionIri() {
         return baseUri + storageDescriptionPath();
     }
@@ -892,6 +951,61 @@ public final class LwsConfiguration {
 
     public String accessGrantsEndpointIri() {
         return baseUri + accessGrantsPath();
+    }
+
+    public String tokenEndpointIri() {
+        return baseUri + tokenPath();
+    }
+
+    /**
+     * The issuer identifier of the embedded authorization server: this storage's base URI, whose
+     * metadata is therefore at {@code /.well-known/lws-configuration} (RFC 8414 section 3).
+     */
+    public String oauthIssuer() {
+        return baseUri;
+    }
+
+    public String oauthMetadataIri() {
+        return baseUri + AS_METADATA_PATH;
+    }
+
+    /** Whether the embedded authorization server issues access tokens for this storage. */
+    public boolean oauthEnabled() {
+        return oauthEnabled;
+    }
+
+    /** Lifetime of an access token the embedded authorization server issues. */
+    public long oauthAccessTokenLifetimeSeconds() {
+        return oauthAccessTokenLifetimeSeconds;
+    }
+
+    /** External authorization servers whose access tokens this storage accepts, by issuer. */
+    public Set<String> oauthTrustedIssuers() {
+        return oauthTrustedIssuers;
+    }
+
+    /**
+     * The authorization server a {@code 401} names in its {@code as_uri}: the embedded one when it
+     * is enabled, otherwise the first trusted external one, otherwise {@code null}.
+     */
+    public String primaryAuthorizationServer() {
+        if (oauthEnabled) {
+            return oauthIssuer();
+        }
+        return oauthTrustedIssuers.isEmpty() ? null : oauthTrustedIssuers.iterator().next();
+    }
+
+    /**
+     * Whether an authentication credential — an ID token, a self-signed JWT, a SAML assertion —
+     * presented to this storage directly is honoured, in addition to access tokens.
+     */
+    public boolean oauthAcceptCredentials() {
+        return oauthAcceptCredentials;
+    }
+
+    /** Whether a notification names the agent that made the change. */
+    public boolean notificationsIncludeActor() {
+        return notificationsIncludeActor;
     }
 
     /** Whether the Access Request / Access Grant services are advertised and served. */
@@ -1096,10 +1210,13 @@ public final class LwsConfiguration {
      * True if no resource may be created or replaced at {@code path} because something else already
      * owns that name.
      *
-     * <p>Four namespaces are reserved: the {@code .acl} and {@code .meta} suffixes, which the
+     * <p>These namespaces are reserved: the {@code .acl} and {@code .meta} suffixes, which the
      * request router diverts to the access-control and linkset handlers; the configured system
-     * prefix (default {@code /.lws}); and the {@code /app} and {@code /callback} trees, which the
-     * console and login filters occupy.
+     * prefix (default {@code /.lws}); the {@code /app} and {@code /callback} trees, which the
+     * console and login filters occupy; and the {@code /.well-known/acme-challenge} and
+     * {@code /.well-known/lws-configuration} paths, where the ACME responder and the authorization
+     * server metadata are served. The rest of {@code /.well-known/} is left to the storage — a
+     * {@code did:web} owner may want its {@code did.json} there.
      *
      * <p>This must be a <em>superset</em> of what the router hides. Reserving more than is shadowed
      * costs a name nobody wants; reserving less is finding C2, where a resource created at
@@ -1119,7 +1236,8 @@ public final class LwsConfiguration {
                 || isUnder(p, systemPrefix.toLowerCase(Locale.ROOT))
                 || isUnder(p, UI_PREFIX)
                 || isUnder(p, CALLBACK_PATH)
-                || isUnder(p, ACME_CHALLENGE_PREFIX);
+                || isUnder(p, ACME_CHALLENGE_PREFIX)
+                || isUnder(p, AS_METADATA_PATH);
     }
 
     private static boolean isUnder(String path, String prefix) {

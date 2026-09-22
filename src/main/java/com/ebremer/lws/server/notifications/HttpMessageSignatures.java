@@ -8,9 +8,14 @@ import java.util.Locale;
 
 /**
  * Produces RFC 9421 HTTP Message Signatures (and the RFC 9530 {@code Content-Digest}) for
- * outbound webhook deliveries, as required by the LWS notifications spec: signatures cover
+ * outbound webhook deliveries, as required by the LWS webhook notification suite: signatures cover
  * {@code @method}, {@code @scheme}, {@code @authority}, {@code @path}, {@code content-type} and
  * {@code content-digest}, with {@code created} and {@code keyid} signature parameters.
+ *
+ * <p>The {@code keyid} is the {@code id} of the signing key's verification method in the storage
+ * description — a URL with a fragment, whose fragment-less part is the storage URI — because that is
+ * how a receiver finds the key: it removes the fragment, dereferences the storage identifier and
+ * looks the method up by {@code id}.
  *
  * @author Erich Bremer
  */
@@ -27,11 +32,23 @@ public final class HttpMessageSignatures {
     private static final String COMPONENTS =
             "(\"@method\" \"@scheme\" \"@authority\" \"@path\" \"content-type\" \"content-digest\")";
 
+    /** Sign with the key's bare thumbprint as {@code keyid}; for callers with no storage to name. */
     public static SignatureHeaders sign(String method, URI target, String contentType,
             byte[] body, WebhookKeys keys, long createdEpochSeconds) {
+        return sign(method, target, contentType, body, keys, keys.keyId(), createdEpochSeconds);
+    }
+
+    /**
+     * Sign a delivery.
+     *
+     * @param keyId the {@code keyid} to name: the {@code id} of the key's verification method in the
+     *              storage description
+     */
+    public static SignatureHeaders sign(String method, URI target, String contentType,
+            byte[] body, WebhookKeys keys, String keyId, long createdEpochSeconds) {
         String contentDigest = "sha-256=:" + base64(sha256(body)) + ":";
         String params = COMPONENTS + ";created=" + createdEpochSeconds
-                + ";keyid=\"" + keys.keyId() + "\";alg=\"ed25519\"";
+                + ";keyid=\"" + keyId + "\";alg=\"ed25519\"";
 
         String authority = authorityOf(target);
         String path = (target.getRawPath() == null || target.getRawPath().isEmpty()) ? "/" : target.getRawPath();

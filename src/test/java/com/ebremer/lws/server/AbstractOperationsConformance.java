@@ -128,7 +128,9 @@ abstract class AbstractOperationsConformance {
         JsonObject item = doc.getJsonArray("items").getJsonObject(0);
         assertEquals(baseUrl + "/cnt/note.txt", item.getString("id"));
         assertEquals("DataResource", item.getString("type"));
-        assertEquals("text/plain", item.getString("mediaType")); // MUST for DataResources
+        // `format` — `mediaType` until the drafts of 21 August 2026 — is a MUST for DataResources.
+        assertEquals("text/plain", item.getString("format"));
+        assertFalse(item.containsKey("mediaType"));
         assertEquals(8, item.getJsonNumber("size").longValue());
         assertTrue(item.containsKey("modified"));
 
@@ -261,36 +263,71 @@ abstract class AbstractOperationsConformance {
         assertFalse(reborn.containsKey("describedby"), "a re-created path must not resurrect the old linkset");
     }
 
+    /**
+     * The storage description is a controlled identifier document served as
+     * {@code application/lws+cid} (lws10-core, Discovery), with the mandatory {@code StorageRoot}
+     * service; and the storage URI — this server's root container URI — answers with it unless
+     * the client asks for a container representation.
+     */
     @Test
-    void storageDescriptionIsLwsJsonAndAdvertisesItself() throws Exception {
-        // Canonical representation is application/lws+json (default, no Accept).
+    void storageDescriptionIsACidDocumentAtTheStorageUri() throws Exception {
         HttpResponse<String> r = send("GET", "/.lws/storage-description", null);
         assertEquals(200, r.statusCode());
-        assertTrue(r.headers().firstValue("Content-Type").orElse("").startsWith("application/lws+json"));
+        assertTrue(r.headers().firstValue("Content-Type").orElse("").startsWith("application/lws+cid"));
         JsonObject doc = parse(r.body());
         assertEquals("Storage", doc.getString("type"));
         assertEquals(baseUrl + "/", doc.getString("id"));
+        assertEquals("https://www.w3.org/ns/cid/v1", doc.getJsonArray("@context").getString(0));
+        assertEquals("https://www.w3.org/ns/lws/v1", doc.getJsonArray("@context").getString(1));
 
-        // The service array MUST include a StorageDescription entry pointing at this resource.
-        boolean hasStorageDescription = false;
+        boolean hasRoot = false;
         boolean hasNotification = false;
         for (JsonValue v : doc.getJsonArray("service")) {
             JsonObject s = v.asJsonObject();
-            if (s.getString("type").equals("StorageDescription")
-                    && s.getString("serviceEndpoint").equals(baseUrl + "/.lws/storage-description")) {
-                hasStorageDescription = true;
+            if (s.getString("type").equals("StorageRoot") && s.getString("serviceEndpoint").equals(baseUrl + "/")) {
+                hasRoot = true;
             }
             if (s.getString("type").equals("NotificationService")) {
                 hasNotification = true;
             }
         }
-        assertTrue(hasStorageDescription, "service array must contain a StorageDescription entry: " + r.body());
+        assertTrue(hasRoot, "the service array MUST contain a StorageRoot service: " + r.body());
         assertTrue(hasNotification, r.body());
 
-        // Content-Type is echoed across the JSON family; RDF stays available via negotiation.
+        // The storage URI dereferences to the same document, by default and on request...
+        HttpResponse<String> storage = send("GET", "/", null);
+        assertEquals(200, storage.statusCode());
+        assertTrue(storage.headers().firstValue("Content-Type").orElse("").startsWith("application/lws+cid"),
+                storage.headers().toString());
+        assertEquals(doc, parse(storage.body()));
+        assertTrue(ct("/", "application/lws+cid").startsWith("application/lws+cid"));
+        // ...and to the root container when a container representation is what the client asks for.
+        assertTrue(ct("/", "application/lws+json").startsWith("application/lws+json"));
+        assertEquals("Container", parse(send("GET", "/", null, "Accept", "application/lws+json").body())
+                .getString("type"));
+        assertTrue(ct("/", "text/turtle").startsWith("text/turtle"));
+
+        // Other representations stay available via negotiation, the same JSON under another name.
         assertTrue(ct("/.lws/storage-description", "application/json").startsWith("application/json"));
         assertTrue(ct("/.lws/storage-description", "application/ld+json").startsWith("application/ld+json"));
         assertTrue(ct("/.lws/storage-description", "text/turtle").startsWith("text/turtle"));
+    }
+
+    /** Every Storage Resource links to its storage (lws10-core, Discovery and Binding). */
+    @Test
+    void everyResourceLinksToItsStorage() throws Exception {
+        assertEquals(201, send("PUT", "/linked", "x", "Content-Type", "text/plain").statusCode());
+        String storageLink = "<" + baseUrl + "/>; rel=\"https://www.w3.org/ns/lws#storage\"";
+        for (String path : new String[] {"/linked", "/linked.meta", "/.lws/storage-description"}) {
+            HttpResponse<String> r = send("GET", path, null);
+            assertEquals(200, r.statusCode(), path);
+            assertTrue(r.headers().allValues("Link").contains(storageLink),
+                    path + " links to its storage: " + r.headers().allValues("Link"));
+            assertFalse(r.headers().allValues("Link").stream().anyMatch(l -> l.contains("storageDescription")),
+                    "the pre-lws10-core relation is gone: " + r.headers().allValues("Link"));
+        }
+        HttpResponse<String> head = send("HEAD", "/linked", null);
+        assertTrue(head.headers().allValues("Link").contains(storageLink), "HEAD too");
     }
 
     private String ct(String path, String accept) throws Exception {
@@ -610,13 +647,16 @@ abstract class AbstractOperationsConformance {
         String turtle = send("GET", "/.lws/storage-description", null, "Accept", "text/turtle").body();
         assertTrue(turtle.contains("sha-256"), "digest algorithms reach the RDF rendering: " + turtle);
         assertTrue(turtle.contains("application/sparql-update"), "PatchSupport detail does too");
-        assertTrue(turtle.contains("StorageDescription"), "and the description resource is typed");
+        assertTrue(turtle.contains("StorageRoot"), "and the root service is there");
+        assertTrue(turtle.contains("JsonWebKey"), "and the signing key's verification method");
 
+        // The webhook signing key is published as a verification method referenced from
+        // authentication (lws10-notifications-webhook).
         JsonObject doc = parse(send("GET", "/.lws/storage-description", null).body());
-        JsonObject description = doc.getJsonObject("storageDescription");
-        assertEquals(baseUrl + "/.lws/storage-description", description.getString("id"));
-        assertEquals("StorageDescription", description.getString("type"));
-        assertEquals(baseUrl + "/", description.getString("storage"));
+        JsonObject method = doc.getJsonArray("verificationMethod").getJsonObject(0);
+        assertTrue(method.getString("id").startsWith(baseUrl + "/#"), method.toString());
+        assertEquals(baseUrl + "/", method.getString("controller"));
+        assertEquals(method.getString("id"), doc.getJsonArray("authentication").getString(0));
     }
 
     /**
@@ -633,7 +673,8 @@ abstract class AbstractOperationsConformance {
         }
         assertTrue(types.contains("https://w3c.github.io/lws-protocol/lws10-authn-openid/"), types.toString());
         assertTrue(types.contains("https://w3c.github.io/lws-protocol/lws10-authn-ssi-cid/"), types.toString());
-        assertTrue(types.contains("https://w3c.github.io/lws-protocol/lws10-authn-ssi-did-key/"), types.toString());
+        // The did:key suite was discontinued; the SSI-CID suite now covers did:key subjects.
+        assertFalse(types.contains("https://w3c.github.io/lws-protocol/lws10-authn-ssi-did-key/"), types.toString());
         // SAML is inert until an IdP certificate is configured, and this server has none, so it is
         // the one suite that must NOT be advertised here.
         assertFalse(types.contains("https://w3c.github.io/lws-protocol/lws10-authn-saml/"),
@@ -657,18 +698,27 @@ abstract class AbstractOperationsConformance {
         assertTrue(allow.contains("PUT"), allow);
     }
 
-    // ----- conformance: a type search needs a type clause -----
+    // ----- conformance: a type search is a QUERY (lws10-index) -----
 
-    /** {@code GET /.lws/type-search} with no type clause used to enumerate the whole storage. */
+    /**
+     * The Type Search Service takes an HTTP {@code QUERY} whose body is an
+     * {@code application/lws-query+json} filter; the {@code GET} and {@code POST} forms the draft
+     * had until July 2026 are gone. A filter with no constraint at all matches every resource the
+     * client may read — lws10-index says so explicitly, where this server used to refuse it.
+     */
     @Test
-    void typeSearchRequiresATypeClause() throws Exception {
-        assertEquals(400, send("GET", "/.lws/type-search", null).statusCode());
-        assertEquals(400, send("GET", "/.lws/type-search?describedby="
-                + java.net.URLEncoder.encode("https://shapes.example/S", java.nio.charset.StandardCharsets.UTF_8),
-                null).statusCode(), "a relation-only filter is still not a type search");
-        assertEquals(200, send("GET", "/.lws/type-search?type="
-                + java.net.URLEncoder.encode("https://www.w3.org/ns/lws#DataResource",
-                        java.nio.charset.StandardCharsets.UTF_8), null).statusCode());
+    void typeSearchIsAQuery() throws Exception {
+        assertEquals(405, send("GET", "/.lws/type-search", null).statusCode(), "not a GET any more");
+        assertEquals(405, send("POST", "/.lws/type-search", "{\"type\":[]}",
+                "Content-Type", "application/lws-query+json").statusCode(), "nor a POST");
+        HttpResponse<String> all = send("QUERY", "/.lws/type-search", "{}",
+                "Content-Type", "application/lws-query+json");
+        assertEquals(200, all.statusCode(), all.body());
+        assertEquals("ContainerPage", parse(all.body()).getString("type"));
+        HttpResponse<String> typed = send("QUERY", "/.lws/type-search",
+                "{\"type\":[\"https://www.w3.org/ns/lws#DataResource\"]}",
+                "Content-Type", "application/lws-query+json");
+        assertEquals(200, typed.statusCode(), typed.body());
     }
 
     // ----- L28: If-None-Match on writes, and PATCH aligned with PUT -----

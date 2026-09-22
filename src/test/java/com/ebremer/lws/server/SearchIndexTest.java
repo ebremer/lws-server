@@ -7,7 +7,6 @@ import java.io.ByteArrayInputStream;
 import java.io.StringReader;
 import java.net.ServerSocket;
 import java.net.URI;
-import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -36,9 +35,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 /**
- * HTTP integration tests for the Type Index and Type Search services (lws10-searchindex), driving a
- * live server in open mode: service discovery, the type index, GET/POST type search (single, OR, AND,
- * container and relation filters, GET/POST equivalence), and the specified error responses.
+ * HTTP integration tests for the Type Index and Type Search services (lws10-index), driving a live
+ * server in open mode: service discovery, the type index, the QUERY type search (single, OR, AND,
+ * container and relation filters, the filter grammar's edge cases, page links), and the specified
+ * error responses.
  *
  * @author Erich Bremer
  */
@@ -110,8 +110,9 @@ class SearchIndexTest {
         Model m = ModelFactory.createDefaultModel();
         RDFDataMgr.read(m, new ByteArrayInputStream(r.body().getBytes(StandardCharsets.UTF_8)),
                 baseUrl + "/", Lang.TURTLE);
-        // Per the vocabulary, the service objects MUST hang off the lws:Storage node, each carrying
-        // its rdf:type and its serviceEndpoint.
+        // The storage description is a controlled identifier document, so the service objects hang
+        // off the lws:Storage node by the CID context's `service`, each carrying its rdf:type and its
+        // serviceEndpoint.
         assertTrue(serviceAdvertised(m, "TypeIndexService", baseUrl + INDEX), r.body());
         assertTrue(serviceAdvertised(m, "TypeSearchService", baseUrl + SEARCH), r.body());
     }
@@ -119,8 +120,9 @@ class SearchIndexTest {
     private static boolean serviceAdvertised(Model model, String serviceType, String endpointIri) {
         String ask = ("""
                 PREFIX lws: <https://www.w3.org/ns/lws#>
+                PREFIX did: <https://www.w3.org/ns/did#>
                 ASK {
-                  ?storage a lws:Storage ; lws:service [ a lws:%s ; lws:serviceEndpoint ?endpoint ] .
+                  ?storage a lws:Storage ; did:service [ a lws:%s ; did:serviceEndpoint ?endpoint ] .
                   FILTER( str(?endpoint) = "%s" )
                 }""").formatted(serviceType, endpointIri);
         try (QueryExecution qe = QueryExecutionFactory.create(QueryFactory.create(ask), model)) {
@@ -142,9 +144,7 @@ class SearchIndexTest {
      * Adds a type to a shared index and takes it away again, so the cleanup runs in a
      * {@code finally}: {@link #typeIndexListsDistinctVisibleTypes} asserts the <em>exact</em> set of
      * visible types, and an assertion failing here used to leave {@code Ephemeral} behind and fail
-     * that one too — a second, misleading red for a defect in neither (finding M46). The class also
-     * no longer depends on JUnit's unspecified default method order to run the two in a workable
-     * sequence; see the {@code @TestMethodOrder} on the class.
+     * that one too — a second, misleading red for a defect in neither (finding M46).
      */
     @Test
     @Order(2)
@@ -153,85 +153,105 @@ class SearchIndexTest {
         try {
             // A resource created while the derived index is in use must become searchable...
             put("/ephemeral", "<> a <" + type + "> .");
-            assertTrue(ids(getLws(baseUrl + SEARCH + "?type=" + enc(type))).contains(baseUrl + "/ephemeral"),
+            assertTrue(ids(query(types(type))).contains(baseUrl + "/ephemeral"),
                     "a newly created resource must be searchable");
         } finally {
             // ...and deleting it must remove it from the index (incremental maintenance).
             delete("/ephemeral");
         }
-        assertEquals(0, getLws(baseUrl + SEARCH + "?type=" + enc(type)).getInt("totalItems"),
-                "a deleted resource must leave the index");
+        assertEquals(0, query(types(type)).getInt("totalItems"), "a deleted resource must leave the index");
+    }
+
+    /** A page reference the server does not recognize is 404 (lws10-index), for the index too. */
+    @Test
+    void typeIndexAnswersAnUnknownPageWithNotFound() throws Exception {
+        assertEquals(404, status(baseUrl + INDEX + "?page=0"));
+        assertEquals(404, status(baseUrl + INDEX + "?page=abc"));
+        assertEquals(404, status(baseUrl + INDEX + "?page=99"));
     }
 
     @Test
-    void typeIndexRejectsQueryWithIllegalPage() throws Exception {
-        assertEquals(400, status(baseUrl + INDEX + "?page=0"));
-        assertEquals(400, status(baseUrl + INDEX + "?page=abc"));
-    }
-
-    @Test
-    void searchSingleType() {
-        JsonObject doc = getLws(baseUrl + SEARCH + "?type=" + enc(SCHEMA_PERSON));
+    void searchSingleType() throws Exception {
+        JsonObject doc = query(types(SCHEMA_PERSON));
         assertEquals("ContainerPage", doc.getString("type"));
         assertEquals(Set.of(baseUrl + "/alice", baseUrl + "/bob"), ids(doc));
     }
 
     @Test
-    void searchOrWithinGroup() {
-        JsonObject doc = getLws(baseUrl + SEARCH + "?type=" + enc(SCHEMA_PERSON) + "," + enc(FOAF_PERSON));
+    void searchOrWithinGroup() throws Exception {
+        JsonObject doc = query("{ \"type\": [ [ \"" + SCHEMA_PERSON + "\", \"" + FOAF_PERSON + "\" ] ] }");
         assertEquals(Set.of(baseUrl + "/alice", baseUrl + "/bob", baseUrl + "/carol"), ids(doc));
     }
 
     @Test
-    void searchAndAcrossGroups() {
-        JsonObject doc = getLws(baseUrl + SEARCH + "?type=" + enc(SCHEMA_PERSON) + "&type=" + enc(LWS_DATA));
+    void searchAndAcrossGroups() throws Exception {
+        JsonObject doc = query("{ \"type\": [ \"" + SCHEMA_PERSON + "\", \"" + LWS_DATA + "\" ] }");
         assertEquals(Set.of(baseUrl + "/alice", baseUrl + "/bob"), ids(doc));
     }
 
     @Test
-    void searchByNativeContainerType() {
-        JsonObject doc = getLws(baseUrl + SEARCH + "?type=" + enc(LWS_CONTAINER));
+    void searchByNativeContainerType() throws Exception {
+        JsonObject doc = query(types(LWS_CONTAINER));
         assertEquals(Set.of(baseUrl + "/"), ids(doc));
     }
 
+    /**
+     * A filter document is plain JSON: an {@code @}-member is ignored, an empty value is no
+     * constraint, duplicate groups count once — and a filter with no constraint at all matches every
+     * resource the client may read (lws10-index).
+     */
     @Test
-    void getAndPostFormsAreEquivalent() throws Exception {
-        Set<String> get = ids(getLws(baseUrl + SEARCH + "?type=" + enc(SCHEMA_PERSON) + "," + enc(FOAF_PERSON)));
-        // POST: a single OR-group nested array.
-        JsonObject post = postLws(baseUrl + SEARCH,
-                "{ \"type\": [ [ \"" + SCHEMA_PERSON + "\", \"" + FOAF_PERSON + "\" ] ] }");
-        assertEquals(get, ids(post));
-
-        // POST AND: two string elements are conjoined, matching the repeated-parameter GET form.
-        Set<String> getAnd = ids(getLws(baseUrl + SEARCH + "?type=" + enc(SCHEMA_PERSON) + "&type=" + enc(LWS_DATA)));
-        JsonObject postAnd = postLws(baseUrl + SEARCH,
-                "{ \"type\": [ \"" + SCHEMA_PERSON + "\", \"" + LWS_DATA + "\" ] }");
-        assertEquals(getAnd, ids(postAnd));
+    void filterGrammarEdgeCases() throws Exception {
+        JsonObject all = query("{}");
+        assertTrue(ids(all).containsAll(Set.of(baseUrl + "/", baseUrl + "/alice", baseUrl + "/event1")), all.toString());
+        assertEquals(ids(all), ids(query("{ \"@context\": \"https://www.w3.org/ns/lws/v1\", \"type\": [] }")),
+                "an @-member and an empty value constrain nothing");
+        assertEquals(Set.of(baseUrl + "/alice", baseUrl + "/bob"),
+                ids(query("{ \"type\": [ \"" + SCHEMA_PERSON + "\", \"" + SCHEMA_PERSON + "\" ] }")),
+                "a duplicate group is ignored");
     }
 
+    /** A URI-valued relation key matches the predicate the resource's own representation asserts. */
     @Test
-    void searchByDescriptiveRelation() {
-        JsonObject doc = getLws(baseUrl + SEARCH + "?type=" + enc(SCHEMA_PERSON) + "&" + enc(SHAPE_PRED) + "=" + enc(SHAPE));
+    void searchByDescriptiveRelation() throws Exception {
+        JsonObject doc = query("{ \"type\": [ \"" + SCHEMA_PERSON + "\" ], \"" + SHAPE_PRED + "\": [ \"" + SHAPE + "\" ] }");
         assertEquals(Set.of(baseUrl + "/alice"), ids(doc));
     }
 
+    /**
+     * A registered relation name matches the links a resource's metadata declares — the
+     * lws10-index example's {@code describedby} — and a relation nothing declares, or that this
+     * server does not index, yields no results rather than an error, indistinguishably.
+     */
     @Test
-    void nonIndexedRelationYieldsNoResultsNotAnError() {
-        // "describedby" is a bare token, not an absolute-URI predicate: the server does not index it,
-        // so the conjunction yields zero matches rather than an error.
-        JsonObject doc = getLws(baseUrl + SEARCH + "?type=" + enc(SCHEMA_PERSON) + "&describedby=" + enc(SHAPE));
-        assertEquals(0, doc.getInt("totalItems"));
-        assertTrue(ids(doc).isEmpty());
+    @Order(40)
+    void searchByADeclaredRegisteredRelation() throws Exception {
+        put("/dave", "<> a <" + SCHEMA_PERSON + "> .");
+        String etag = getRaw(baseUrl + "/dave.meta").headers().firstValue("ETag").orElseThrow();
+        HttpResponse<String> patched = http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/dave.meta"))
+                .header("Content-Type", "application/merge-patch+json").header("If-Match", etag)
+                .method("PATCH", HttpRequest.BodyPublishers.ofString(
+                        "{\"describedby\":[{\"href\":\"" + SHAPE + "\"}]}")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(204, patched.statusCode(), patched.body());
+        try {
+            JsonObject doc = query("{ \"type\": [ \"" + SCHEMA_PERSON + "\" ], \"describedby\": [ \"" + SHAPE + "\" ] }");
+            assertEquals(Set.of(baseUrl + "/dave"), ids(doc));
+            assertEquals(Set.of(baseUrl + "/dave"),
+                    ids(query("{ \"DescribedBy\": [ \"" + SHAPE + "\" ] }")), "registered names are case-insensitive");
+            assertEquals(0, query("{ \"describedby\": [ \"https://shapes.example/Other\" ] }").getInt("totalItems"));
+            assertEquals(0, query("{ \"https://ex.org/not-indexed\": [ \"" + SHAPE + "\" ] }").getInt("totalItems"));
+            // Server-managed relations are never indexed: `up` answers nothing, though every
+            // resource has one.
+            assertEquals(0, query("{ \"up\": [ \"" + baseUrl + "/\" ] }").getInt("totalItems"));
+        } finally {
+            delete("/dave");
+        }
     }
 
     /**
      * {@code Link: rel="type"} on a write declares the resource's type, and the type index finds it
-     * (lws10-searchindex makes this the preferred type source).
-     *
-     * <p>Pre-fix, {@code HttpSupport.parseLinks} dropped every {@code rel="type"} and
-     * {@code LinksetService} refused the {@code type} relation outright, so a client had no way to
-     * declare a type at all — and a <em>binary</em> resource, which has no content graph to assert
-     * one in, had no way to carry one by any route. Both assertions below fail against it.
+     * (lws10-index makes this the preferred type source).
      */
     @Test
     @Order(30)
@@ -253,9 +273,15 @@ class SearchIndexTest {
         assertTrue(types.contains(declared), "the declared type is kept: " + types);
         assertTrue(types.contains(LWS_DATA), "the server's structural type is still there: " + types);
 
-        // And a type search finds it.
-        assertTrue(ids(getLws(baseUrl + SEARCH + "?type=" + enc(declared))).contains(baseUrl + "/photo.bin"),
-                "a declared type must be searchable");
+        // It is advertised in the resource's own Link headers, as lws10-core has every Storage
+        // Resource do...
+        assertTrue(getRaw(baseUrl + "/photo.bin").headers().allValues("Link")
+                .contains("<" + declared + ">; rel=\"type\""), "declared type in the Link headers");
+        // ...and a type search finds it, the result naming it alongside the structural type.
+        JsonObject found = query(types(declared));
+        assertEquals(Set.of(baseUrl + "/photo.bin"), ids(found));
+        assertEquals(Json.createArrayBuilder().add("DataResource").add(declared).build(),
+                found.getJsonArray("items").getJsonObject(0).getJsonArray("type"));
     }
 
     /**
@@ -283,17 +309,13 @@ class SearchIndexTest {
         assertEquals(Set.of(LWS_DATA), types,
                 "only the server's own structural type survives: " + types);
 
-        // The whole LWS namespace is refused, not a hand-listed few — which is why the search for a
-        // term the denylist would have had to enumerate finds nothing.
-        assertEquals(0, getLws(baseUrl + SEARCH + "?type="
-                + enc("https://www.w3.org/ns/lws#Storage")).getInt("totalItems"));
+        assertEquals(0, query(types("https://www.w3.org/ns/lws#Storage")).getInt("totalItems"));
     }
 
     /**
      * The interaction models keep their existing meaning: {@code Link: rel="type"} naming one is the
      * client saying what kind of resource to <em>create</em>, and a container hint on a slash-less
-     * name is still the contradiction M13 refuses. Opening {@code rel="type"} as a type source must
-     * not have quietly turned that into an ordinary declared type.
+     * name is still the contradiction M13 refuses.
      */
     @Test
     @Order(32)
@@ -306,30 +328,76 @@ class SearchIndexTest {
         assertEquals(400, r.statusCode(), "a container IRI must end in '/' (finding M13)");
     }
 
+    /** OPTIONS advertises the method in Allow and the filter format in Accept-Query (RFC 10008). */
     @Test
-    void postWrongMediaTypeIsRejected() throws Exception {
+    void optionsAdvertisesQueryAndItsFormat() throws Exception {
         HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(baseUrl + SEARCH))
-                .header("Content-Type", "text/plain")
-                .POST(HttpRequest.BodyPublishers.ofString("{}")).build(), HttpResponse.BodyHandlers.ofString());
-        assertEquals(415, r.statusCode());
+                .method("OPTIONS", HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(204, r.statusCode());
+        assertTrue(r.headers().firstValue("Allow").orElse("").contains("QUERY"), r.headers().toString());
+        assertEquals("application/lws-query+json", r.headers().firstValue("Accept-Query").orElse(""));
     }
 
     @Test
-    void postMalformedFilterIsRejected() throws Exception {
-        assertEquals(400, postStatus(baseUrl + SEARCH, "{ \"type\": \"not-an-array\" }"));
-        assertEquals(400, postStatus(baseUrl + SEARCH, "{ \"type\": [ 42 ] }"));
-        assertEquals(400, postStatus(baseUrl + SEARCH, "not json"));
+    void theQueryMustSayWhatFormatItIs() throws Exception {
+        HttpResponse<String> missing = http.send(HttpRequest.newBuilder(URI.create(baseUrl + SEARCH))
+                .method("QUERY", HttpRequest.BodyPublishers.ofString("{}")).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, missing.statusCode(), "RFC 10008 requires a Content-Type");
+
+        HttpResponse<String> unsupported = rawQuery("application/sparql-query", "SELECT * WHERE { ?s ?p ?o }", null);
+        assertEquals(415, unsupported.statusCode());
+        assertEquals("application/lws-query+json", unsupported.headers().firstValue("Accept-Query").orElse(""),
+                "a 415 lists the formats this server does accept");
     }
 
     @Test
-    void invalidUriValueIsRejected() throws Exception {
-        assertEquals(400, status(baseUrl + SEARCH + "?type=" + enc("not a uri")));
-        assertEquals(400, postStatus(baseUrl + SEARCH, "{ \"type\": [ \"relative/uri\" ] }"));
+    void malformedFiltersAreRejected() throws Exception {
+        assertEquals(400, queryStatus("{ \"type\": \"not-an-array\" }"));
+        assertEquals(400, queryStatus("{ \"type\": [ 42 ] }"));
+        assertEquals(400, queryStatus("{ \"type\": [ [ ] ] }"), "an empty group is refused, not ignored");
+        assertEquals(400, queryStatus("[ \"not an object\" ]"));
+        assertEquals(400, queryStatus("not json"));
     }
 
     @Test
-    void pageBeyondLastIsNotFound() throws Exception {
-        assertEquals(404, status(baseUrl + SEARCH + "?type=" + enc(SCHEMA_PERSON) + "&page=2"));
+    void invalidIriValueIsRejected() throws Exception {
+        assertEquals(400, queryStatus("{ \"type\": [ \"not a uri\" ] }"));
+        assertEquals(400, queryStatus("{ \"type\": [ \"relative/uri\" ] }"));
+        assertEquals(400, queryStatus("{ \"describedby\": [ \"relative\" ] }"), "relation targets too");
+        assertEquals(200, queryStatus("{ \"type\": [ \"https://ex.org/t#frag\" ] }"), "a fragment is fine");
+    }
+
+    /** A filter over the server's complexity bound is 422 — understood, not processed, never narrowed. */
+    @Test
+    void anOverComplexFilterIsUnprocessable() throws Exception {
+        StringBuilder groups = new StringBuilder();
+        for (int i = 0; i < 40; i++) {
+            groups.append(i == 0 ? "" : ",").append("\"https://ex.org/t").append(i).append('"');
+        }
+        assertEquals(422, queryStatus("{ \"type\": [ " + groups + " ] }"));
+    }
+
+    @Test
+    void anAcceptThatExcludesJsonIsNotAcceptable() throws Exception {
+        assertEquals(406, rawQuery("application/lws-query+json", types(SCHEMA_PERSON), "text/turtle").statusCode());
+        HttpResponse<String> ld = rawQuery("application/lws-query+json", types(SCHEMA_PERSON), "application/ld+json");
+        assertEquals(200, ld.statusCode());
+        assertTrue(ld.headers().firstValue("Content-Type").orElse("").startsWith("application/ld+json"));
+        assertTrue(ld.headers().allValues("Vary").toString().contains("Accept"));
+    }
+
+    /** Page links are opaque and dereferenced with GET; a stale one is 404. */
+    @Test
+    void pageLinksDereferenceAndStaleOnesAreNotFound() throws Exception {
+        HttpResponse<String> r = rawQuery("application/lws-query+json", types(SCHEMA_PERSON), null);
+        String first = r.headers().allValues("Link").stream().filter(l -> l.endsWith("rel=\"first\""))
+                .findFirst().orElseThrow();
+        String url = first.substring(1, first.indexOf('>'));
+        JsonObject again = getLws(url);
+        assertEquals(Set.of(baseUrl + "/alice", baseUrl + "/bob"), ids(again));
+        assertEquals(404, status(url.replace("page=1", "page=2")), "past the last page");
+        assertEquals(404, status(baseUrl + SEARCH + "?q=bm90LWEtZmlsdGVy&page=1"), "an unrecognized reference");
+        assertEquals(404, queryStatusAt(SEARCH + "?page=2", types(SCHEMA_PERSON)));
     }
 
     @Test
@@ -337,7 +405,10 @@ class SearchIndexTest {
         HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(baseUrl + SEARCH))
                 .PUT(HttpRequest.BodyPublishers.ofString("x")).build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(405, r.statusCode());
-        assertTrue(r.headers().firstValue("Allow").orElse("").contains("POST"));
+        assertTrue(r.headers().firstValue("Allow").orElse("").contains("QUERY"));
+        HttpResponse<String> get = http.send(HttpRequest.newBuilder(URI.create(baseUrl + SEARCH)).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(405, get.statusCode(), "the search itself is a QUERY, not a GET");
     }
 
     @Test
@@ -346,6 +417,8 @@ class SearchIndexTest {
                 HttpResponse.BodyHandlers.ofString());
         assertTrue(r.headers().firstValue("Cache-Control").orElse("").contains("no-store"));
         assertFalse(r.headers().allValues("Link").isEmpty(), "pagination Link headers should be present");
+        HttpResponse<String> q = rawQuery("application/lws-query+json", "{}", null);
+        assertTrue(q.headers().firstValue("Cache-Control").orElse("").contains("private"));
     }
 
     // ----- helpers -----
@@ -382,23 +455,48 @@ class SearchIndexTest {
         }
     }
 
-    private static JsonObject postLws(String url, String body) throws Exception {
-        HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(url))
-                .header("Content-Type", "application/lws+json")
-                .POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, r.statusCode(), url + " -> " + r.statusCode() + " " + r.body());
+    /** A filter document constraining {@code type} to the given IRIs (each its own AND group). */
+    private static String types(String... iris) {
+        StringBuilder sb = new StringBuilder("{ \"type\": [ ");
+        for (int i = 0; i < iris.length; i++) {
+            sb.append(i == 0 ? "" : ", ").append('"').append(iris[i]).append('"');
+        }
+        return sb.append(" ] }").toString();
+    }
+
+    /** A type search: an HTTP QUERY (RFC 10008) with an application/lws-query+json filter. */
+    private static JsonObject query(String filter) throws Exception {
+        HttpResponse<String> r = rawQuery("application/lws-query+json", filter, null);
+        assertEquals(200, r.statusCode(), filter + " -> " + r.statusCode() + " " + r.body());
+        assertTrue(r.headers().firstValue("Content-Type").orElse("").startsWith("application/lws+json"));
         return Json.createReader(new StringReader(r.body())).readObject();
+    }
+
+    private static HttpResponse<String> rawQuery(String contentType, String body, String accept) throws Exception {
+        return rawQueryAt(SEARCH, contentType, body, accept);
+    }
+
+    private static HttpResponse<String> rawQueryAt(String path, String contentType, String body, String accept)
+            throws Exception {
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(baseUrl + path))
+                .header("Content-Type", contentType)
+                .method("QUERY", HttpRequest.BodyPublishers.ofString(body));
+        if (accept != null) {
+            b.header("Accept", accept);
+        }
+        return http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static int queryStatus(String body) throws Exception {
+        return rawQuery("application/lws-query+json", body, null).statusCode();
+    }
+
+    private static int queryStatusAt(String path, String body) throws Exception {
+        return rawQueryAt(path, "application/lws-query+json", body, null).statusCode();
     }
 
     private static int status(String url) throws Exception {
         return http.send(HttpRequest.newBuilder(URI.create(url)).GET().build(),
-                HttpResponse.BodyHandlers.ofString()).statusCode();
-    }
-
-    private static int postStatus(String url, String body) throws Exception {
-        return http.send(HttpRequest.newBuilder(URI.create(url))
-                .header("Content-Type", "application/lws+json")
-                .POST(HttpRequest.BodyPublishers.ofString(body)).build(),
                 HttpResponse.BodyHandlers.ofString()).statusCode();
     }
 
@@ -408,10 +506,6 @@ class SearchIndexTest {
             out.add(item.asJsonObject().getString("id"));
         }
         return out;
-    }
-
-    private static String enc(String value) {
-        return URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 
     private static int freePort() throws Exception {

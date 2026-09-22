@@ -60,7 +60,9 @@ final class AuthTestSupport {
         if (kid != null) {
             header.keyID(kid);
         }
-        JWTClaimsSet.Builder claims = new JWTClaimsSet.Builder().subject(sub).expirationTime(exp);
+        // iat, as every credential suite that is self-signed requires (lws10-authn-ssi-cid).
+        JWTClaimsSet.Builder claims = new JWTClaimsSet.Builder().subject(sub).expirationTime(exp)
+                .issueTime(new Date());
         if (iss != null) {
             claims.issuer(iss);
         }

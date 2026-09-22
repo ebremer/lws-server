@@ -33,6 +33,8 @@ import com.ebremer.lws.server.http.LwsResourceServlet;
 import com.ebremer.lws.server.http.SearchIndexServlet;
 import com.ebremer.lws.server.http.StorageDescriptionServlet;
 import com.ebremer.lws.server.http.SubscriptionServlet;
+import com.ebremer.lws.server.oauth.AuthorizationServerMetadataServlet;
+import com.ebremer.lws.server.oauth.TokenEndpointServlet;
 import com.ebremer.lws.server.tls.AcmeCertificateManager;
 import com.ebremer.lws.server.tls.AcmeChallengeServlet;
 import com.ebremer.lws.server.tls.AcmeChallengeStore;
@@ -314,14 +316,22 @@ public final class JettyLauncher {
         context.addFilter(wicket, "/app/*", req);
 
         // Servlets (specific mappings win over the catch-all "/*").
-        context.addServlet(new ServletHolder(
-                new StorageDescriptionServlet(c.storageDescriptionService(), config, c.clock())),
+        context.addServlet(new ServletHolder(new StorageDescriptionServlet(c.storageDescriptionResponder())),
                 config.storageDescriptionPath());
+        if (c.tokenExchange() != null) {
+            // The embedded authorization server (lws10-core, Authorization): its token endpoint and
+            // its RFC 8414 metadata at the well-known path lws10-core registers.
+            context.addServlet(new ServletHolder(
+                    new TokenEndpointServlet(c.tokenExchange(), c.dpopValidator(), config)), config.tokenPath());
+            context.addServlet(new ServletHolder(
+                    new AuthorizationServerMetadataServlet(config, c.tokenExchange())),
+                    LwsConfiguration.AS_METADATA_PATH);
+        }
         context.addServlet(new ServletHolder(new SubscriptionServlet(c.subscriptionService(), config)),
                 config.subscriptionsPath());
         context.addServlet(new ServletHolder(new SubscriptionServlet(c.subscriptionService(), config)),
                 config.subscriptionsPath() + "/*");
-        context.addServlet(new ServletHolder(new JwksServlet(c.webhookKeys())), config.jwksPath());
+        context.addServlet(new ServletHolder(new JwksServlet(c.jwkSetJson())), config.jwksPath());
         if (config.searchIndexEnabled()) {
             ServletHolder searchIndex = new ServletHolder(new SearchIndexServlet(c.searchIndexService(), config));
             context.addServlet(searchIndex, config.typeIndexPath());
@@ -335,8 +345,8 @@ public final class JettyLauncher {
             context.addServlet(access, config.accessGrantsPath());
             context.addServlet(access, config.accessGrantsPath() + "/*");
         }
-        context.addServlet(new ServletHolder(
-                new LwsResourceServlet(c.resourceService(), config, c.aclService(), c.linksetService())), "/*");
+        context.addServlet(new ServletHolder(new LwsResourceServlet(c.resourceService(), config,
+                c.aclService(), c.linksetService(), c.storageDescriptionResponder())), "/*");
         return context;
     }
 }

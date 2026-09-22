@@ -188,7 +188,8 @@ public final class WebhookDispatcher implements AutoCloseable {
         try {
             long created = System.currentTimeMillis() / 1000L;
             HttpMessageSignatures.SignatureHeaders sig = HttpMessageSignatures.sign(
-                    "POST", inbox, delivery.contentType(), delivery.body(), keys, created);
+                    "POST", inbox, delivery.contentType(), delivery.body(), keys,
+                    config.storageIri() + "#" + keys.keyId(), created);
             HttpRequest request = HttpRequest.newBuilder(inbox)
                     .timeout(Duration.ofSeconds(15))
                     .header("Content-Type", delivery.contentType())

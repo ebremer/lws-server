@@ -1,182 +1,201 @@
 # LWS Protocol Compliance: lws-server
 
-**Date:** 2026-07-09  
-**Scope:** Whether `lws-server` correctly implements LWS Core and the other LWS protocol suites (aside from known security/concurrency bugs).  
-**Related:** `REVIEW-lws-server.md` (code review findings)
+**Date:** 2026-09-22
+**Specification baseline:** the LWS editor's drafts of **21 September 2026** — `w3c/lws-protocol` @
+[`3ddc642`](https://github.com/w3c/lws-protocol/commit/3ddc642) ("Clarify DID support in the SSI-CID
+authentication suite", #233).
+**Previous baseline:** the drafts this server was built against between June and August 2026, which
+predate most of the changes listed below. That revision of this document (2026-07-09) is in git
+history.
+**Related:** `README.md` (behaviour), `TODO.md` drafts band **D** (the work this baseline took),
+`REVIEW.md` / `REVIEW-lws-server.md` (security and correctness findings).
 
 ## Short answer
 
-**Yes** — aside from the known bugs and a few claim/ops gaps, `lws-server` is a real implementation of **LWS Core + vocab + all four auth suites + notifications + search/type-index** (and access requests/grants as part of core). It is **not** a full formal “conformance suite pass” against a frozen Recommendation, because **LWS Core’s published HTML is still incomplete**, and this project follows the **Operations/ source + LDP/Solid conventions** where the draft is silent.
+`lws-server` implements the **LWS 1.0 editor's drafts of 21 September 2026**: LWS Core — including
+the OAuth 2.0 authorization baseline, the controlled-identifier storage description, the notification
+data model and access requests and grants —, the vocabulary, the Type Index and QUERY-based Type
+Search services, the webhook notification suite, and the three current authentication suites. The
+discontinued self-signed `did:key` suite is still accepted, deprecated. Where the server departs from
+a draft it does so deliberately, and each departure is listed under
+[Deliberate divergences](#deliberate-divergences) with its reason.
 
----
+The drafts are not a Recommendation: several sections are still marked TBD or "needs to align", the
+LWS JSON-LD context is not yet published, and the Core Editor's Draft still carries editorial
+scaffolding. Conformance here is to the text as it stands at the baseline commit.
 
-## What “the suites” are
+## Specification status
 
-From the [LWS protocol set](https://w3c.github.io/lws-protocol/):
+| Specification | Status at the baseline | This server |
+|---|---|---|
+| [lws10-core](https://w3c.github.io/lws-protocol/lws10-core/) | Editor's Draft, 21 Sep 2026 | Implemented; see below |
+| [lws10-vocab](https://w3c.github.io/lws-protocol/lws10-vocab/) | Draft (DNOTE snapshot 14 Jul 2026, vocabulary 21 Sep 2026) | Terms used as defined, `StorageResource` included |
+| [lws10-index](https://w3c.github.io/lws-protocol/lws10-index/) (was `lws10-searchindex`) | Draft, renamed 21 Sep 2026 | Implemented, `QUERY` search |
+| [lws10-notifications-webhook](https://w3c.github.io/lws-protocol/lws10-notifications-webhook/) | Draft (split from `lws10-notifications`, 24 Jul 2026) | Implemented |
+| [lws10-authn-openid](https://w3c.github.io/lws-protocol/lws10-authn-openid/) | Draft | Implemented, at the token endpoint and directly |
+| [lws10-authn-saml](https://w3c.github.io/lws-protocol/lws10-authn-saml/) | Draft | Implemented when an IdP certificate is configured |
+| [lws10-authn-ssi-cid](https://w3c.github.io/lws-protocol/lws10-authn-ssi-cid/) | Draft; DID subjects since 21 Sep 2026 | Implemented, with `did:key` and `did:web` subjects |
+| [lws10-authn-ssi-did-key](https://w3c.github.io/lws-protocol/lws10-authn-ssi-did-key/) | **Discontinued** 18 Sep 2026 | Credentials without a `kid` still accepted, deprecated; not advertised |
 
-| Spec | Role in `lws-server` |
-|------|----------------------|
-| **lws10-core** | Storage, resources, containers, CRUD, discovery, linksets, access requests/grants |
-| **lws10-vocab** | `https://www.w3.org/ns/lws#` terms |
-| **authn-*** (×4) | Credential validation at the resource server |
-| **lws10-notifications** | Webhook subscriptions + signed delivery (RFC 9421 `@authority` normalized; delete notifications authorized against the deleted resource, not its parent) |
-| **lws10-searchindex** | Type Index + Type Search |
+## What changed since the previous baseline
 
-Extras (useful, **not** separate LWS “suites”): WAC, DPoP, ACME/TLS, optional Fuseki, quotas, Wicket UI.
+Each spec change after the server's first commit (14 June 2026) that bears on a storage server, and
+what the server does about it now.
 
----
+| Spec change | What it requires | Now |
+|---|---|---|
+| Authorization (Dec 2025, #45; clarified 18 Jun, #169) | OAuth 2.0 baseline: a storage server validates access tokens from a trusted authorization server; a `401` carries `as_uri` and `realm`; the AS publishes metadata at `/.well-known/lws-configuration` and supports token exchange | **Implemented** — it predates the server but had not been: an embedded authorization server (token exchange, RFC 9068 tokens, metadata, JWKS), access-token validation for it and for trusted external servers, and the challenge. Direct credential presentation kept as an additional mechanism |
+| #179 (20 Jul) — `QUERY` replaces `GET`/`POST` search | Type Search is an HTTP `QUERY` (RFC 10008) with an `application/lws-query+json` body; `Accept-Query`; `400`/`415`/`406`/`422`/`404` | **Implemented**; the old `GET`/`POST` forms removed |
+| #185 (24 Jul) — notification data model in core | `Notification` envelope with `storage` and `activity`; array `type`s; `target`/`origin`; `application/lws+json` requests, responses and deliveries | **Implemented** |
+| #183 (27 Jul) — storage description as a CID document | `application/lws+cid`; `@context` `[cid/v1, lws/v1]`; `id` the storage URI; a mandatory `StorageRoot` service; `rel="…lws#storage"` on every `GET`/`HEAD`; the storage URI answers with the description | **Implemented** — the storage URI is the root container's (see divergence 1) |
+| #190 (3 Aug) — conneg consolidated into the media type section | `lws+json`, `ld+json`, `json` equivalent for containers, `Content-Type` echoed, `Vary: Accept` | Already so |
+| #187, #203, #199, #218 (3–21 Aug) — context, ACL references, access-request terms | Editorial / terminology | No behaviour change |
+| #221 (10 Aug) — `subject_token_types_supported` | AS metadata member | **Implemented** |
+| #224 (21 Aug) — `Slug` no longer mentioned | The identity hint is abstract | `Slug` still honoured as the hint |
+| #219 (21 Aug) — Activity Streams terms replaced | `mediaType` → `format` (container items and the access-profile operand); `totalItems`/`items` LWS terms; `dcterms:modified` | **Implemented**; the `mediaType` operand still read in stored grants |
+| #228 (14 Sep) — ETag requirements | `ETag` on `GET`/`HEAD` of resources and linksets (RFC 9110) | Already so |
+| #229 (18 Sep) — did:key suite discontinued | The SSI-CID suite subsumes it | did:key subjects validated by SSI-CID; kid-less did:key credentials accepted, deprecated; capability dropped |
+| #234 (21 Sep) — `lws:StorageResource` | The class, and the access-target matcher that matches any Storage Resource | **Implemented** — target matchers are now enforced (they were ignored) |
+| #244 (21 Sep) — CID context in the webhook snippet | The signing key is a `verificationMethod` of the storage description, referenced from `authentication`; `keyid` is its id | **Implemented** |
+| #249 (21 Sep) — `lws10-index` | Rename | Capability URL updated |
+| #227 (21 Sep) — `subject_identifier_types_supported` | AS metadata member | **Implemented**: `https`, `did:key`, `did:web` |
+| #233 (21 Sep) — SSI-CID supports DID URIs | DID documents are CID documents | **Implemented** for `did:key` (local) and `did:web` (HTTPS) |
 
-## LWS Core — substantially yes
+## LWS Core
 
-Core’s rendered Editor’s Draft is still largely skeletal; normative detail lives in operations text and LDP/Solid practice. Against that practical bar, the server implements the main model and HTTP surface.
+### Authentication
 
-### Present and aligned
+- **Credential data model.** Every suite yields a subject, issuer and client; a credential must be
+  signed (`alg: none` is refused everywhere) and, for the JWT suites, audience-bound
+  (`lws.audience`, and at the token endpoint the authorization server itself).
+- **Token type identifiers.** `urn:ietf:params:oauth:token-type:id_token` (OpenID),
+  `…:jwt` (self-signed CID), `…:saml2` (SAML), as the token endpoint's `subject_token_type`.
 
-| Area | What the code does |
-|------|--------------------|
-| **Resource model** | Storage root, containment, `Container` / `DataResource`, parent hierarchy |
-| **Create** | `POST` into container (Slug, `Link: rel="type"`), `PUT` at exact path |
-| **Read** | `GET`/`HEAD`, content negotiation, authz-filtered container listings |
-| **Update** | Conditional `PUT` (428 without `If-Match`, 412 stale, compare-and-swap inside the write transaction, enforced in the service so the console cannot bypass it); `PATCH` SPARQL Update on RDF (single-graph only), merge-patch / JSON Patch on JSON and linksets |
-| **Delete** | Resource delete; non-empty container → 409 unless `Depth: infinity` recursive delete |
-| **Containers** | Canonical `application/lws+json` listing (`type`, `id`, `totalItems`, `items` with `mediaType`/`size`/`modified`) + pagination |
-| **Auxiliary metadata** | `*.meta` linkset (`application/linkset+json`), `rel="up"` / `rel="linkset"`, conditional meta writes, `Prefer: set-linkset` |
-| **Discovery** | Storage description (`Storage` + `service` / `capability`), self-advertised `StorageDescription` |
-| **Conditionals / HTTP** | ETags, `Last-Modified` / `If-Modified-Since`, byte ranges (206/416), `Accept-Ranges` |
-| **Errors** | RFC 9457 `application/problem+json` |
-| **Access requests & grants** | Container-like endpoints, ODRL-ish docs, `GrantAuthorizer`, revocable grants, fail-closed unknown constraints |
-| **AuthZ** | Owner mode or WAC; grants layered on top |
-
-Conformance-style coverage lives in `OperationsConformanceTest` (lws+json containers, ranges, conditional PUT, linksets, storage description, recursive delete, SPARQL `LOAD`/`SERVICE` guard, problem+json, etc.), with the concurrency semantics of those conditionals in `ConditionalWriteTest` and delete atomicity in `DeleteAtomicityTest`.
-
-### Gaps / softness (beyond security bugs)
-
-| Gap | Nature |
-|-----|--------|
-| **Spec incompleteness** | No locked Rec; README admits flux and LDP/Solid fill-ins |
-| **Optimistic concurrency** | `If-Match` is compared inside the write transaction on PUT/PATCH/DELETE, on linkset writes and on ACL writes (H23/M18/prior-13). **PUT and PATCH require a precondition**; DELETE does not, deliberately — it is not an update and there is no lost state after one. `If-None-Match: *` on PUT is create-only (L28). An entity-tag names a *representation*, so the five RDF serialisations of one resource carry five tags; a write may be conditioned on any of them (M21) |
-| **Blob vs RDF TX** | Resolved: every write goes to a fresh opaque blob key and cleanup is deferred until the transaction commits or aborts (H13) |
-| **Merge Patch over RDF** | Deliberate departure: RFC 7386 merge patch is supported on JSON resources and linksets but **refused with `415` on RDF resources**, because applying it through the JSON-LD representation destroyed multi-subject graphs (H21). SPARQL Update is the RDF patch path. Strict-conformance deployments that need merge-patch on RDF would have to normalize the `{"@graph":[…]}` shape first — now safe to revisit, since `RdfIO.parse` refuses named-graph data instead of dropping it |
-| **Full “metadata resource” story** | Linksets are solid; broader “metadata resource” draft sections are still TBD in the ED |
-| **Authorization profile** | LWS doesn’t mandate WAC; OWNER vs WAC is an implementation choice (reasonable) |
-
-**Since this was written**, the P2 remediation closed the conformance gaps this document had been
-describing as soft: all four authentication suites are advertised (only OpenID was), the RDF and
-`application/lws+json` renderings of the storage description are derived from one document (the RDF
-one had been dropping every capability's detail), `Link: rel="type"` is accepted as a type source,
-`POST` to a data resource answers `405` rather than `409`, and a type search requires a type clause.
-Cross-origin access exists at all: there was no `Access-Control-*` header anywhere, which made the
-whole browser-client story — and `acl:origin`, which the WAC engine implements — unreachable. It is
-off until `lws.cors.allowed-origins` names an origin, and never sends `Allow-Credentials`.
-
-**Core verdict:** For an interoperable LWS *storage* as the drafts + Operations describe today — **yes, correctly oriented and largely complete**, with draft-driven incompleteness rather than a missing product surface. The concurrency and atomicity bugs this row used to name are closed: conditional writes are a compare-and-swap under the writer lock, and a resource, its content, its ACL and its linkset are deleted in one transaction.
-
----
-
-## LWS Vocabulary — yes
-
-`vocab/LWS.java` (and AS/LDP/ACL companions) mint the expected terms: `Storage`, `Container`, `DataResource`, notification/search/access types, services, etc. Servlets and services emit `application/lws+json` with the LWS context. This is real vocab use, not a rename layer.
-
----
-
-## Authentication suites (as RP) — yes, with known gaps
-
-Server-side: four validators + `LwsCredentialValidator` routing.
-
-| Suite | Protocol algorithm | Caveats (non-bug + bugs) |
-|-------|--------------------|---------------------------|
-| **OpenID** | CID → subject-anchored OpenIdProvider → discovery → JWT | `aud` enforced against `lws.audience`; `azp` informational (surfaced as the principal's client id, consumed by ODRL `client` constraints); the console login applies the same subject-trusts-issuer check |
-| **SSI CID** | `sub==iss==client_id` → CID key by kid | `aud` enforced; lifetime capped by `lws.token.max-lifetime-seconds` |
-| **SAML** | OOB IdP certs → signature bound to the assertion → NameID | one Assertion and one Signature per document; `AudienceRestriction` required when `lws.saml.audience` is set |
-| **did:key** | Decode key from id → JWT | `aud` enforced; lifetime capped by `lws.token.max-lifetime-seconds` |
-
-**Verdict:** Suite *shapes* are correct. Audience binding and self-signed token lifetimes are
-enforced across the three JWT suites, and the SAML signature is now bound to the assertion whose
-claims are used — the profile that buys it refuses a multi-assertion document, which rules out a
-signed `samlp:Response` carrying unsigned assertions.
-
----
-
-## Notifications — yes (strong)
-
-Matches the notifications proposal’s main MUSTs:
+### Authorization
 
 | Requirement | Implementation |
-|-------------|----------------|
-| Advertise `NotificationService` + `WebhookSubscription` | Storage description |
-| POST subscription with `type` / `topic` / `inbox` | `SubscriptionService` + servlet |
-| Create-time read auth on every topic | Enforced |
-| Delivery-time re-check of read auth | `NotificationEmitter.authorizedToReceive` |
-| Container topic recursive | `Subscription.covers` |
-| Envelope `Notification` + AS2 Create/Update/Delete | Built on resource events |
-| RFC 9421 components (`@method`, `@scheme`, `@authority`, `@path`, `content-type`, `content-digest`) + `created`/`keyid` | `HttpMessageSignatures` |
-| Key in storage description | Webhook Ed25519 keys + storage description |
-| List / GET / DELETE subscriptions | `SubscriptionServlet` |
-| expires, retry, deactivate after failures | Config + dispatcher |
+|---|---|
+| `401` with a conforming challenge: `as_uri`, `realm` | `Bearer as_uri="<issuer>", realm="<storage URI>"` (and `DPoP`, with `algs`); `error` when a token was refused |
+| `Link rel="…lws#storage"` on a `401` (SHOULD) | Yes |
+| AS metadata at `/.well-known/lws-configuration` (RFC 8414) | Embedded AS; `subject_token_types_supported`, `subject_identifier_types_supported` |
+| Token endpoint supports token exchange; `resource` required and must name a known storage; `subject_token` validated | `<system-prefix>/token`; any `resource` other than this storage is `invalid_target` |
+| Access token per RFC 9068 with `sub`, `iss`, `client_id`, `aud` (the resource), `exp` (≤ 300 s recommended), `iat`, `jti` | `ES256`, `typ: at+jwt`, 300 s by default, never longer than the credential; DPoP binding (`cnf.jkt`) on request |
+| Error responses per RFC 6749 §5.2 | JSON `error`/`error_description`, `Cache-Control: no-store` |
+| Storage validates signature (keys from `jwks_uri`, cached, rotation), issuer, audience (exactly one value), `exp`/`nbf`/`iat` | `AccessTokenValidator`; external issuers via their `/.well-known/lws-configuration` |
+| Presentation with `Authorization: Bearer` (RFC 6750) | Yes, and `DPoP` (RFC 9449) |
 
-**Gaps (ops/security more than “wrong suite”):**
-
-- Spec expects **authenticated** subscription create; anonymous creation is off by default (`lws.subscriptions.allow-anonymous`) and `lws.public-read` now defaults to **false**, so an anonymous subscriber no longer passes topic authorization by default either.
-- **Webhook SSRF** (inbox not under outbound policy) — security bug, not a missing envelope model.
-- Actor inclusion policy is an implementation detail (spec prefers omit by default).
-
----
-
-## Search & Type Index — yes (strong)
+### Discovery
 
 | Requirement | Implementation |
-|-------------|----------------|
-| Advertise `TypeIndexService` / `TypeSearchService` | Storage description (when enabled) |
-| Type Index GET → paginated `TypeIndex` | `SearchIndexServlet` + service |
-| Type Search GET **and** POST, CNF (`type` OR groups, AND across params) | Implemented |
-| Authz filter live; `totalItems` client-specific | Explicit in code + `SearchIndexAuthzTest` |
-| Don’t index structural/protocol relations as free discovery oracle | Admin graph separated; unindexed relations → empty results |
-| Reject over-complex filters (400), not silent narrowing | Clause/value bounds |
-| `Cache-Control: private, no-store` | Servlet |
+|---|---|
+| Storage description is a CID document: `id` the storage URI, `type` `Storage`, `service` with a `StorageRoot`, optional `capability` | Yes |
+| `application/lws+cid`; `@context` starting `cid/v1`, `lws/v1` | Yes; `ld+json`, `json` and RDF by negotiation |
+| Every `GET`/`HEAD` of a Storage Resource links `rel="…lws#storage"` to the storage | Resources, linksets, ACLs, the subscription and access containers |
+| Requests for the storage URI return the description | Yes — `/`, unless a container representation is asked for (divergence 1) |
 
-**Type sources:** the server's structural type, any `rdf:type` the resource's own representation asserts, **and client `Link: rel="type"` on a write** — the spec's preferred source, and the only one a binary resource has. A client may add types and never override: the whole `lws:` namespace and the LDP interaction models are refused, so it can describe its resource and cannot claim to be a container or a storage. A type search requires at least one `type` clause; without one it used to enumerate every resource the caller could read. Eventual-consistency of the index is acknowledged; in practice events are sync on the write path.
+### Containers, operations and metadata
 
----
+| Requirement | Implementation |
+|---|---|
+| Container representation: `id`, `type`, `totalItems`, `items`; items with `id`, `type`, `format` (MUST for data resources), `size`, `modified` | Yes; item `type` also names declared types |
+| `lws+json` / `ld+json` / `json` equivalence, `Content-Type` echoed, `Vary: Accept` | Yes |
+| Pagination: `first` MUST, `next` when more, opaque links, `200` | Yes (`?page=N`) |
+| Create with `POST`; `Link: <…lws#Container>; rel="type"` for a container; `201` + `Location`; `up`, `linkset` (with `type`), `type` links | Yes |
+| Read: range requests, `ETag`, `Link`s, `HEAD` | Yes |
+| Update: `PUT`/`PATCH`; merge patch MUST be supported | JSON resources and linksets: yes. RDF resources: refused (divergence 2) |
+| `Prefer: set-linkset` | Yes |
+| Delete: `204`; non-empty container `409` unless `Depth: infinity` | Yes, atomically with its linkset and ACL |
+| Linkset: `application/linkset+json`, `Allow` includes `GET`, `PATCH`; `Accept-Patch: application/merge-patch+json`; `412` on a failed precondition | Yes (`PUT` and JSON Patch as well) |
+| Types in `Link` headers, including user-defined ones | Yes — the types a client declares with `Link: rel="type"` are advertised on `GET`/`HEAD` |
+| `PreferLinkRelations` | `Prefer: include="…"`/`omit="…"` on a linkset read (divergence 7) |
 
-## Access requests & grants (core section) — yes
+### Notifications (core data model)
 
-- Advertised services, create/list/delete style endpoints  
-- Grants enforced via `GrantAuthorizer`  
-- No `Control` via grant; fail-closed unknown constraints
-- Issuance requires a configured storage controller (refused entirely while `lws.owners` is empty), `storage` and every `target.value` are validated against the storage root at creation, and a grant's authority is re-checked against its issuer at every evaluation — so removing an issuer from `lws.owners`, or revoking its `acl:Control`, deactivates its grants on the next request  
-- Notifications to inboxes on create (when configured)  
+| Requirement | Implementation |
+|---|---|
+| `NotificationService` with `serviceEndpoint` and `subscriptionType` | Yes |
+| Envelope: `type` `Notification`, `storage`, `activity` | Yes, `@context` `[lws/v1, activitystreams]` |
+| Activity: `id`, `type` (array), `object` (`id`, `type` array), `published` (RFC 3339); `target` on `Create`, `origin` on `Delete`; `actor` optional | Yes; `actor` omitted unless `lws.notifications.include-actor` (the privacy SHOULD) |
+| Subscription request `application/lws+json` with `type` and `topic` | Yes |
+| Response `application/lws+json` with `type` and `subscription` | Yes (`201`, `Location`, `expires`) |
+| Authorization at subscription and at delivery time; revocation stops delivery | Yes, including for deletes (decided before the delete) |
 
-Remaining issues are scale (load all grants) and notification SSRF on arbitrary inboxes — not “feature missing.”
+### Access requests and grants
 
----
+| Requirement | Implementation |
+|---|---|
+| `AccessRequestService` / `AccessGrantService` with `conformsTo` `lws#AccessProfile` | Yes |
+| Endpoints are LWS containers: `GET`, `POST` (`Location`), `DELETE` | Yes; listings are paginated container representations of data resources |
+| `type`, `storage` (URI), `inbox`, `access` | Yes; `storage` must be this storage |
+| Access profile: `AccessPolicy`; actions `read`/`modify`/`create`/`delete`; `assignee` (or `foaf:Agent`); `target` with a matcher `type` (`StorageResource`, `DataResource`, `Container`) and `value`s | Yes; matchers enforced, unknown ones refused |
+| Constraints `client`, `format`, `type`, `purpose`, `dateTime`; all must hold | Yes, fail-closed; `mediaType` read as `format` in stored grants |
+| Notifications on request and grant creation, in the notification data model | Yes |
+| Privacy: hide a client-constrained grant from other clients | Yes |
 
-## Scorecard
+## Vocabulary
 
-| Suite / area | Correct core model? | Completeness | Main residual issues |
-|--------------|---------------------|--------------|----------------------|
-| **LWS Core** | Yes | High for practical ops | Spec flux |
-| **Vocab** | Yes | High | — |
-| **Auth ×4** | Yes | High shape / high claim-strict | `azp` informational; single-assertion SAML profile |
-| **Notifications** | Yes | High | Public-topic anonymous subscribe; webhook SSRF |
-| **Search/Type Index** | Yes | High | Derivation source bias; unbounded in-memory type index at scale |
-| **Access grants** | Yes | High | Perf under many grants; inbox SSRF |
+The server writes the terms the vocabulary defines, as it defines them: `format` is `dcterms:format`,
+`modified` `dcterms:modified`, `size` `schema:size`, `inbox` `ldp:inbox`, `expires` `schema:expires`,
+`items`/`totalItems` in the LWS namespace, and the storage description's `service`,
+`serviceEndpoint`, `verificationMethod`, `authentication` and `controller` in the CID context's
+namespaces in its RDF rendering.
 
----
+## Type Index and Type Search (lws10-index)
 
-## Bottom line
+| Requirement | Implementation |
+|---|---|
+| `TypeIndexService` / `TypeSearchService` advertised | Yes |
+| Type index: `GET`, paginated `TypeIndex` of the client's visible types | Yes |
+| Type search: `QUERY` with `application/lws-query+json`; `Content-Type` required (`400`); other formats `415` with `Accept-Query`; `OPTIONS` with `Allow` and `Accept-Query` | Yes |
+| Filter: `@`-members ignored; `type` optional; CNF; empty group `400`; empty value no constraint; duplicates ignored; relation keys; absolute-IRI values (`400`) | Yes; `{}` matches everything visible |
+| Over-complex filter `422`, never narrowed | Yes (32 groups / 256 values) |
+| `406` when `Accept` excludes the result formats; `Vary: Accept` | Yes |
+| `ContainerPage` items with `id` and `type` | Yes |
+| Stale page link `404`/`410` | `404` |
+| Types from `Link` headers, server state and content, treated identically | Yes |
+| Indexed relations not enumerated; unindexed ≡ unmatched; structural relations never indexed | Yes |
+| Authorization filtering live; counts over the filtered view; not shared-cacheable | Yes; `Cache-Control: private, no-store`, `Vary: Authorization` |
 
-**Yes — `lws-server` correctly implements LWS Core and the other LWS suites in the sense that matters for a real storage:** resource/containment CRUD, storage description, linksets, the four auth credential shapes, webhook notifications with signed delivery and dual-time authz, type index/search with live authz filtering, and access requests/grants.
+## Webhook notification suite
 
-What it is **not**:
+| Requirement | Implementation |
+|---|---|
+| `WebhookSubscription` with `inbox` and `expires` | Yes |
+| Subscription management: `GET` lists as an LWS container (paging SHOULD); `GET`/`DELETE` a subscription | Yes |
+| Delivery body `application/lws+json` | Yes |
+| RFC 9421 signature over `@method @scheme @authority @path content-type content-digest`, `created` and `keyid` | Yes |
+| Signing key in the storage description as a `verificationMethod` referenced from `authentication`; `keyid` its id | Yes: `<storage URI>#<thumbprint>`, `JsonWebKey` |
 
-1. A **formal Rec-level conformance certificate** (core ED is incomplete; behavior fills gaps with LDP/Solid).  
-2. **Bug-free** (concurrency/atomicity in particular; see `REVIEW.md` for what is fixed and what is not).  
-3. **Claim-maximal** on every MUST in auth drafts (`aud`, etc.).
+## Authentication suites
 
-### Ship posture (protocol fidelity)
+| Suite | Implementation |
+|---|---|
+| **OpenID Connect** | ID token, not `none`; `sub`/`iss`/`azp`; subject document read as a CID document (JSON first — the suite's own example is plain JSON — or RDF) whose own `service` names `iss` as `lws#OpenIdProvider`; OIDC discovery for the key |
+| **SAML 2.0** | Out-of-band trust; one assertion, one enveloped signature bound to it; `NameID`/`Issuer`/`Recipient`/`Audience` |
+| **Self-signed CID** | `sub` = `iss` = `client_id`; `exp` and `iat` required; `kid` selects a method of the `authentication` relationship (CID 1.0 §3.3): controlled by the subject, in its document, `JsonWebKey` (no private members) or `Multikey`, not revoked or expired. Subjects: HTTPS, `did:key` (local), `did:web` (HTTPS) |
+| **did:key** (discontinued) | Credentials without a `kid` still accepted, deprecated |
 
-**Ship with fixes** — architecture and suite coverage are sound; production multi-tenant needs the security/concurrency fixes, not a rewrite of the protocol engine.
+## Deliberate divergences
 
-### Suggested next step
+| # | Divergence | Why |
+|---|---|---|
+| 1 | **The storage URI is the root container's URI** | lws10-core allows it ("Storage MAY function as a root container"), and the alternatives are worse: the `realm` must logically contain every resource, so it cannot be a URI no resource starts with, and moving the root would move every resource. `/` therefore answers with the description unless a container representation is requested. A generic `Accept: application/json` gets the listing, since the core makes `json` a container type; a webhook receiver should ask for `application/lws+cid` |
+| 2 | **Merge patch is refused on RDF resources (`415`)** | lws10-core: a server "MUST minimally support JSON Merge Patch". Applying it through the JSON-LD form of a graph destroyed multi-subject graphs (finding H21); SPARQL Update is the RDF patch format. Merge patch works on JSON resources and linksets |
+| 3 | **Replacing or patching requires `If-Match` (`428` otherwise)** — resources and linksets | Stricter than the SHOULD; it is what makes lost updates impossible rather than unlikely |
+| 4 | **Authentication credentials are accepted directly by default** | An additional mechanism lws10-core permits, and how every existing client of this server authenticates. `lws.oauth.accept-authentication-credentials=false` turns it off |
+| 5 | **kid-less did:key credentials are accepted** | The discontinued suite's credentials; the SSI-CID suite requires a `kid`. Deprecated, not advertised |
+| 6 | **`JsonWebKey2020` and `Ed25519VerificationKey2020` read as `JsonWebKey` and `Multikey`** | Same key material in the same members, and common in existing DID documents |
+| 7 | **`PreferLinkRelations` wire syntax** | The core names the preference but not its syntax; `Prefer: include="…"` / `omit="…"` is this server's |
+| 8 | **An access-grant `target` is required** | The profile makes it OPTIONAL; a grant without one would authorize nothing or everything, so it is refused |
+| 9 | **The LWS JSON-LD context is referenced, never fetched** | `https://www.w3.org/ns/lws/v1` is not published yet (its digest is a TODO in the core); documents name it and the RDF renderings use this server's mapping. The CID v1 context is bundled |
+| 10 | **The authorization server is minimal** | Token exchange only, public clients, one key, tokens for this storage only; the core leaves the rest to OAuth |
+| 11 | **`subject_identifier_types_supported` lists `"https"`** | The prose says values start with a scheme such as `"https:"`, the example and the default say `"https"`; the example is followed |
 
-A checklist of MUST statements vs code for core Operations only (create/read/update/delete + linkset + storage description), line by line — that is where “conformance” will get sharper as the Editor’s Draft fills in.
+## Open items
+
+- **OpenID EdDSA ID tokens** cannot be verified, and the algorithm allow-list is seeded from the
+  token's own header (a `TODO.md` low-tail item, not a spec change).
+- **DID methods** other than `did:key` and `did:web` are refused by name; no universal resolver is
+  consulted.
+- The access-request notification section is marked "needs to align" in the core; the server
+  delivers the core notification data model there.

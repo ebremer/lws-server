@@ -67,6 +67,22 @@ class LwsOpenIdValidatorTest {
         assertEquals(idp.cidTrustedSubject(), principal.get().webId());
     }
 
+    /**
+     * The subject document as lws10-authn-openid's own example writes it — plain JSON with the CID v1
+     * context, served as {@code application/json} — establishes trust; the RDF reading this server
+     * relied on could not parse it (no JSON-LD media type, and a context it refused to fetch).
+     */
+    @Test
+    void acceptsTheSuitesOwnJsonCidDocument() throws Exception {
+        String token = idp.mintIdToken(idp.jsonCidSubject(), Instant.now().plusSeconds(3600));
+        Optional<LwsPrincipal> principal = validator.validate(token);
+        assertTrue(principal.isPresent(), "the JSON CID document names this issuer");
+        assertEquals(idp.jsonCidSubject(), principal.get().webId());
+
+        String other = idp.mintIdToken(idp.jsonCidSubjectOfAnotherProvider(), Instant.now().plusSeconds(3600));
+        assertTrue(validator.validate(other).isEmpty(), "a document naming another provider does not");
+    }
+
     @Test
     void rejectsSubjectThatDoesNotTrustIssuer() throws Exception {
         String token = idp.mintIdToken(idp.untrustedSubject(), Instant.now().plusSeconds(3600));

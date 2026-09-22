@@ -42,6 +42,18 @@ public final class RdfFormats {
     /** The variant token for the {@code application/lws+json} rendering, which is not RDF. */
     public static final String LWS_JSON_VARIANT = "lwsjson";
 
+    /** The container representation's media type (lws10-core, LWS Media Type). */
+    public static final String LWS_JSON = "application/lws+json";
+
+    /**
+     * The storage description's media type: a controlled identifier document extended with the LWS
+     * vocabulary (lws10-core, LWS Media Type).
+     */
+    public static final String LWS_CID = "application/lws+cid";
+
+    /** The variant token for the {@code application/lws+cid} rendering of the storage description. */
+    public static final String LWS_CID_VARIANT = "lwscid";
+
     /** Ordered by server preference (first = most preferred when a client expresses no preference). */
     private static final List<Entry> ENTRIES = List.of(
             new Entry(TURTLE, Lang.TURTLE, RDFFormat.TURTLE_PRETTY, "ttl"),
@@ -70,6 +82,7 @@ public final class RdfFormats {
         java.util.Set<String> tokens = new java.util.LinkedHashSet<>();
         ENTRIES.forEach(e -> tokens.add(e.variantToken()));
         tokens.add(LWS_JSON_VARIANT);
+        tokens.add(LWS_CID_VARIANT);
         VARIANT_TOKENS = java.util.Set.copyOf(tokens);
     }
 
@@ -163,6 +176,46 @@ public final class RdfFormats {
                 Math.max(matchQuality(NTRIPLES, items),
                         Math.max(matchQuality(RDFXML, items), matchQuality(TRIG, items))));
         return rdf > json;
+    }
+
+    /**
+     * The quality {@code acceptHeader} gives {@code mediaType}: {@code 1.0} when there is no
+     * {@code Accept} at all, {@code 0.0} when it is refused or matched by nothing.
+     */
+    public static double quality(String mediaType, String acceptHeader) {
+        if (acceptHeader == null || acceptHeader.isBlank()) {
+            return 1.0;
+        }
+        return matchQuality(stripParameters(mediaType), parseAccept(acceptHeader));
+    }
+
+    /**
+     * Whether a request for the storage URI is asking for the storage description rather than the
+     * root container listing.
+     *
+     * <p>This server's storage URI is its root container's URI, which lws10-core allows ("Storage
+     * MAY function as a root container"), so one URI has two representations and {@code Accept}
+     * decides between them. The core requires the storage URI to answer with the
+     * {@code application/lws+cid} description "unless content negotiation requires a different
+     * format", so the description wins whenever the client does not rank a container representation
+     * — the lws+json family or an RDF serialization — strictly higher: no {@code Accept}, a bare
+     * wildcard, and a browser's {@code *}{@code /*;q=0.8} all get the description, while
+     * {@code Accept: application/lws+json} or {@code text/turtle} gets the container.
+     */
+    public static boolean prefersStorageDescription(String acceptHeader) {
+        if (acceptHeader == null || acceptHeader.isBlank()) {
+            return true;
+        }
+        List<AcceptItem> items = parseAccept(acceptHeader);
+        double cid = matchQuality(LWS_CID, items);
+        if (cid <= 0.0) {
+            return false;
+        }
+        double container = 0.0;
+        for (String type : List.of(LWS_JSON, JSONLD, "application/json", TURTLE, NTRIPLES, RDFXML, TRIG)) {
+            container = Math.max(container, matchQuality(type, items));
+        }
+        return cid >= container;
     }
 
     /**

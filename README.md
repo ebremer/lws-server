@@ -8,21 +8,29 @@ It implements:
 
 - **[LWS Core](https://w3c.github.io/lws-protocol/lws10-core/)** — the resource/containment model and CRUD operations.
 - **[LWS Vocabulary](https://w3c.github.io/lws-protocol/lws10-vocab/)** — the `https://www.w3.org/ns/lws#` terms.
-- **Authentication suites** — all four LWS suites:
+- **[LWS Authorization](https://w3c.github.io/lws-protocol/lws10-core/#authorization)** — the OAuth 2.0
+  baseline: an embedded authorization server (Token Exchange, RFC 8693; metadata at
+  `/.well-known/lws-configuration`) issuing RFC 9068 access tokens for this storage, the storage's
+  validation of those tokens (and of trusted external servers'), and `as_uri`/`realm` challenges.
+- **Authentication suites** — the three current LWS suites:
   [OpenID Connect](https://w3c.github.io/lws-protocol/lws10-authn-openid/),
-  [SAML 2.0](https://w3c.github.io/lws-protocol/lws10-authn-saml/),
-  [Self-signed Controlled Identifier](https://w3c.github.io/lws-protocol/lws10-authn-ssi-cid/), and
-  [Self-signed did:key](https://w3c.github.io/lws-protocol/lws10-authn-ssi-did-key/).
-- **[LWS Notifications](https://w3c.github.io/lws-protocol/lws10-notifications/)** — webhook subscriptions with RFC 9421 HTTP Message Signatures.
-- **[LWS Search & Type Index](https://w3c.github.io/lws-protocol/lws10-searchindex/)** — the `TypeIndexService` and `TypeSearchService` discovery services (authorization-filtered).
-- **[Access Requests & Grants](https://w3c.github.io/lws-protocol/lws10-core/#access-requests)** — ODRL-based `AccessRequestService`/`AccessGrantService`; grants are enforced and revocable.
+  [SAML 2.0](https://w3c.github.io/lws-protocol/lws10-authn-saml/), and
+  [Self-signed Controlled Identifier](https://w3c.github.io/lws-protocol/lws10-authn-ssi-cid/), which
+  covers HTTPS, `did:key` and `did:web` subjects. The
+  [self-signed did:key](https://w3c.github.io/lws-protocol/lws10-authn-ssi-did-key/) suite it
+  replaced was discontinued on 18 September 2026; its credentials are still accepted, deprecated.
+- **[LWS Notifications](https://w3c.github.io/lws-protocol/lws10-core/#notifications)** — the core
+  notification data model and the [webhook suite](https://w3c.github.io/lws-protocol/lws10-notifications-webhook/),
+  with RFC 9421 HTTP Message Signatures verifiable from the storage description.
+- **[LWS Search & Type Index](https://w3c.github.io/lws-protocol/lws10-index/)** — the `TypeIndexService` and the `QUERY`-based `TypeSearchService` (authorization-filtered).
+- **[Access Requests & Grants](https://w3c.github.io/lws-protocol/lws10-core/#access-requests-and-grants)** — ODRL-based `AccessRequestService`/`AccessGrantService`; grants are enforced and revocable.
 
-> The LWS core **operations** (create/read/update/delete, container representation, metadata) are
-> implemented from the normative `Operations/` source in the [spec repository](https://github.com/w3c/lws-protocol/tree/main/lws10-core/Operations),
-> which is ahead of the rendered Editor's Draft. Where the draft is still silent this implementation
-> follows the **LDP / Solid Protocol conventions** it derives from (trailing-slash containers,
-> `Link: rel="type"` interaction models, content negotiation, conditional requests). Because the
-> source is in flux, these details may change.
+> **Specification baseline:** the LWS editor's drafts as of **21 September 2026**
+> (`w3c/lws-protocol` @ `3ddc642`). See [COMPLIANCE.md](COMPLIANCE.md) for what changed since the
+> previous baseline and where this server departs from the drafts, deliberately. Where the drafts
+> are still silent this implementation follows the **LDP / Solid Protocol conventions** it derives
+> from (trailing-slash containers, `Link: rel="type"` interaction models, content negotiation,
+> conditional requests).
 
 ## Design goals
 
@@ -171,7 +179,12 @@ exception. Key settings:
 | `lws.max-request-bytes` | `67108864` | Max request-body size (`0` = unlimited); larger requests get `413` |
 | `lws.audience` | this storage's IRI | Accepted `aud` values for JWT credentials (comma/space separated) |
 | `lws.audience.require` | `true` | Require an `aud` claim; a wrong `aud` is refused regardless |
-| `lws.token.max-lifetime-seconds` | `3600` | Max lifetime of a self-signed (did:key / SSI-CID) credential (`0` = unlimited) |
+| `lws.token.max-lifetime-seconds` | `3600` | Max lifetime of a self-signed (SSI-CID, including did:key) credential (`0` = unlimited) |
+| `lws.oauth.enabled` | `true` | Run the embedded authorization server: token endpoint `<system-prefix>/token`, metadata `/.well-known/lws-configuration` |
+| `lws.oauth.access-token-lifetime-seconds` | `300` | Lifetime of the access tokens it issues (1–3600; never longer than the exchanged credential) |
+| `lws.oauth.trusted-issuers` | | External authorization servers whose RFC 9068 access tokens are also accepted |
+| `lws.oauth.accept-authentication-credentials` | `true` | Also accept an authentication credential presented directly (the pre-baseline behaviour) |
+| `lws.notifications.include-actor` | `false` | Name the agent that made a change in notifications (lws10-core: omit by default) |
 | `lws.dpop.require-nonce` | `false` | Require a server-issued nonce in DPoP proofs (RFC 9449 §8) |
 | `lws.dpop.require` | `false` | Refuse plain `Bearer` entirely (a `cnf.jkt` token is always refused there) |
 | `lws.dpop.jti-cache-size` | `100000` | Retained DPoP proof ids; a size eviction re-opens a replay window, so size it above peak DPoP requests per acceptance window |
@@ -291,8 +304,10 @@ challenge types (TLS-ALPN-01, DNS-01) and non-Let's-Encrypt CAs are not wired up
 ### Bootstrapping the first owner
 
 `lws.owners` holds WebIDs/DIDs, but you need a *credential* for one before you can act as that
-owner. The self-signed [`did:key`](https://w3c.github.io/lws-protocol/lws10-authn-ssi-did-key/)
-suite needs no identity provider, so a bundled helper can mint the very first owner offline:
+owner. A `did:key` subject of the
+[self-signed controlled identifier](https://w3c.github.io/lws-protocol/lws10-authn-ssi-cid/) suite
+needs no identity provider — its DID document is derived from the identifier itself — so a bundled
+helper can mint the very first owner offline:
 
 ```
 # from the packaged fat jar
@@ -304,23 +319,27 @@ mvn -q exec:java -Dexec.mainClass=com.ebremer.lws.server.tools.DidKeyTool
 ```
 
 It prints (1) a `did:key:…` to drop into `lws.owners`, (2) a private-key seed to keep secret
-(pass it back with `--key <seed>` to re-mint tokens for the same identity), and (3) a ready Bearer
-token to send as `Authorization: Bearer <token>`. Options: `--ttl <seconds>` (token lifetime,
-default 3600) and `--audience <aud>`. Put the DID in `lws.owners`, restart, and the token
-authenticates you as that owner.
+(pass it back with `--key <seed>` to re-mint credentials for the same identity), and (3) a ready
+credential — a self-issued JWT whose `kid` names the DID's verification method — to send as
+`Authorization: Bearer <token>` or to exchange at `/.lws/token` for an access token. Options:
+`--ttl <seconds>` (lifetime, default 3600) and `--audience <aud>`. Put the DID in `lws.owners`,
+restart, and the credential authenticates you as that owner.
 
 ## HTTP API
 
 | Method | Target | Behaviour |
 |---|---|---|
 | `GET`/`HEAD` | data resource | Content-negotiated representation (Turtle, JSON-LD, N-Triples, RDF/XML); binary streamed as-is, with byte-range support (`206`/`416`, `Accept-Ranges: bytes`) |
-| `GET`/`HEAD` | container | `application/lws+json` listing (`id`/`type`/`totalItems`/`items[]` with `id`/`type`/`mediaType`/`size`/`modified`); content-negotiable as `application/ld+json`/`application/json` (the requested `Content-Type` is echoed) or RDF; paginated (`?page=N`, `Link` rel=`first`/`prev`/`next`/`last`) above `lws.container.page-size` |
+| `GET`/`HEAD` | `/` (the storage URI) | The **storage description** (`application/lws+cid`) unless the client asks for a container representation — `application/lws+json`, `application/ld+json`, `application/json` or an RDF type — in which case the root container listing below |
+| `GET`/`HEAD` | container | `application/lws+json` listing (`id`/`type`/`totalItems`/`items[]` with `id`/`type`/`format`/`size`/`modified`, `type` naming any declared types after `DataResource`/`Container`); content-negotiable as `application/ld+json`/`application/json` (the requested `Content-Type` is echoed) or RDF; paginated (`?page=N`, `Link` rel=`first`/`prev`/`next`/`last`) above `lws.container.page-size` |
 | `POST` | a container | Create a contained resource; `Slug` names it, `Link: rel="type"` picks container/RDF/non-RDF; `201` + `Location`. A reserved name is refused with `409` — see [Reserved names](#reserved-names) |
 | `PUT` | any IRI | Create (new) or replace (existing) at that exact IRI; replacing MUST be conditional. A reserved path is refused with `409`; an existing container with `409` (its representation is its membership); a `Link: rel="type"` that contradicts the IRI's own shape with `400` |
 | `PATCH` | RDF or JSON resource | RDF: `application/sparql-update`; JSON & linkset: `application/merge-patch+json` (RFC 7386) or `application/json-patch+json` (RFC 6902) |
 | `DELETE` | any resource | Delete (non-empty container → `409`, or recursive with `Depth: infinity`); removes the resource's metadata too |
 | `GET`/`HEAD`/`PATCH`/`PUT`/`OPTIONS` | `<resource>.meta` | The resource's linkset (metadata) resource — see [Metadata](#metadata-linkset) |
 | `OPTIONS` | any | `Allow`, `Accept-Post`, `Accept-Patch`, `Want-Content-Digest` |
+| `POST` | `<system-prefix>/token` | OAuth 2.0 Token Exchange (RFC 8693) at the embedded authorization server — see [Authentication](#authentication) |
+| `GET` | `/.well-known/lws-configuration` | The embedded authorization server's metadata (RFC 8414) |
 
 <a id="reserved-names"></a>
 **Reserved names.** Four namespaces belong to the server, and no resource may be created or replaced
@@ -330,10 +349,11 @@ in them — `POST` with such a `Slug`, and `PUT` at such a path, are answered `4
 |---|---|
 | any name ending `.acl` | the access-control resource of its target |
 | any name ending `.meta` | the linkset (metadata) resource of its target |
-| `lws.system-prefix` (default `/.lws`) and below | the storage description, JWKS, subscriptions, type index, access requests/grants |
+| `lws.system-prefix` (default `/.lws`) and below | the storage description, JWKS, token endpoint, subscriptions, type index, access requests/grants |
 | `/app` and `/callback` and below | the management console and the OIDC login callback |
+| `/.well-known/lws-configuration` and `/.well-known/acme-challenge` and below | the authorization server metadata and the ACME HTTP-01 responder |
 
-The request router already sends all four elsewhere, so a resource created at one of those names was
+The request router already sends all of these elsewhere, so a resource created at one of those names was
 unreachable by every HTTP method — and, before this was enforced, `POST` with `Slug: .acl` wrote the
 graph governing access to the container it was posted to. The match ignores case and covers the
 container form (`.acl/`), because reserving more than is routed away is free while reserving less is
@@ -387,19 +407,30 @@ written by one agent and read by another on the same origin as the `/app/` conso
 content is never allowed to become script in that origin. Serving user content from a separate
 hostname remains the stronger arrangement if you can.
 
-Responses carry `ETag`, `Last-Modified`, and `Link` relations: `rel="type"` interaction models,
-`rel="…/lws#storageDescription"`, `rel="up"` (parent container, non-root), and `rel="linkset"`
-(the metadata resource). `If-None-Match`/`If-Modified-Since` (→ `304`) and `If-Match` (→ `412`) are
-honoured; an unconditional PUT replacing an existing resource is refused with `428 Precondition
-Required`; a write exceeding `lws.quota.max-bytes` is refused with `507 Insufficient Storage`.
-Errors are returned as `application/problem+json` (RFC 9457); a `401` carries `WWW-Authenticate` and
-a `rel="storageDescription"` Link so a client can discover how to authenticate. The storage description is served at
-`/.lws/storage-description` as `application/lws+json` (the canonical `{id,type:"Storage",capability,
-service}` document, advertising a `StorageDescription` service entry alongside the notification and
-search services). Each `capability` is a **structured object** (`{type, …}`): the implemented
-protocol modules (type only), a `PatchSupport` entry mapping each target media type to its accepted
-PATCH formats, a `ContentNegotiation` entry listing the interchangeable RDF serialisations, and an
-RFC 9530 digest entry listing the supported algorithms. RDF is available via content negotiation.
+Responses carry `ETag`, `Last-Modified`, and `Link` relations: `rel="type"` — the interaction
+models, `https://www.w3.org/ns/lws#Container`/`#DataResource`, and any type the resource's metadata
+declares —, `rel="https://www.w3.org/ns/lws#storage"` to the storage URI (on every `GET` and `HEAD`
+of a Storage Resource, linksets, ACLs and the server's own containers included), `rel="up"` (parent
+container, non-root), and `rel="linkset"` (the metadata resource). `If-None-Match`/`If-Modified-Since`
+(→ `304`) and `If-Match` (→ `412`) are honoured; an unconditional PUT replacing an existing resource is
+refused with `428 Precondition Required`; a write exceeding `lws.quota.max-bytes` is refused with
+`507 Insufficient Storage`. Errors are returned as `application/problem+json` (RFC 9457).
+
+A `401` carries the lws10-core challenge — `WWW-Authenticate: Bearer as_uri="<authorization server>",
+realm="<storage URI>"` (and the same for `DPoP`, with its `algs`) — and the link to the storage, so a
+client learns where to get an access token and what to ask for without a hardcoded URI.
+
+**The storage description** is a W3C controlled identifier document (lws10-core, Storage Description
+Resource), served as `application/lws+cid` at the storage URI — this server's root URI, `/` — and at
+`/.lws/storage-description`. Its `@context` is `["https://www.w3.org/ns/cid/v1",
+"https://www.w3.org/ns/lws/v1"]`, its `id` the storage URI; it lists the `StorageRoot` service (the
+root container) and the notification, search, access and SPARQL services, publishes the webhook
+signing key as a `JsonWebKey` verification method referenced from `authentication`, and carries the
+capabilities. Each `capability` is a **structured object** (`{type, …}`): the implemented
+specifications (type only), a `PatchSupport` entry mapping each target format to its accepted PATCH
+formats, one `ContentNegotiation` entry per RDF serialisation, and an RFC 9530 digest entry listing the
+supported algorithms. `application/ld+json`, `application/json` and RDF are available via content
+negotiation.
 
 **Integrity (RFC 9530).** A request that carries a `Content-Digest` has its body verified before any
 write — a mismatch or malformed field is rejected with `400`, and digest algorithms the server does
@@ -458,15 +489,48 @@ curl -X PATCH -H 'Content-Type: application/merge-patch+json' \
 
 ### Authentication
 
-Present a credential in the `Authorization` header (`Bearer`, `DPoP`, or `SAML2`). A single
-orchestrator routes it to the right suite by shape and returns the authenticated principal, which
-is carried on the request and read by the authorization layer. All four LWS suites are supported:
+**The baseline: access tokens (lws10-core, Authorization).** A client exchanges an authentication
+credential for an access token at an authorization server, and presents the token to the storage.
+This server embeds one (`lws.oauth.enabled`, on by default):
+
+```bash
+# what a 401 says: where to get a token (as_uri) and what for (realm)
+curl -si http://localhost:8080/private | grep -i www-authenticate
+#   WWW-Authenticate: Bearer as_uri="http://localhost:8080", realm="http://localhost:8080/", ...
+
+curl -s http://localhost:8080/.well-known/lws-configuration     # RFC 8414 metadata
+curl -s http://localhost:8080/.lws/token \
+     -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+     --data-urlencode resource=http://localhost:8080/ \
+     --data-urlencode subject_token="$CREDENTIAL" \
+     -d subject_token_type=urn:ietf:params:oauth:token-type:jwt
+#   {"access_token":"eyJ...","issued_token_type":"urn:ietf:params:oauth:token-type:access_token",
+#    "token_type":"Bearer","expires_in":300}
+```
+
+The token endpoint validates the `subject_token` with the suite its `subject_token_type` names
+(`…:id_token` OpenID, `…:jwt` self-signed CID, `…:saml2` SAML) — its audience must name this
+authorization server or its token endpoint — and issues an RFC 9068 JWT (`typ: at+jwt`, `ES256`, key
+at `/.lws/jwks`) with `iss` this server, `sub` and `client_id` the credential's subject and client,
+`aud` exactly the storage URI, and a lifetime of `lws.oauth.access-token-lifetime-seconds` (300 s)
+that never outlives the credential. Only this storage is a valid `resource` (`invalid_target`
+otherwise). A token request carrying a `DPoP` proof gets a DPoP-bound token (`cnf.jkt`,
+`token_type: DPoP`). The storage validates an access token's signature (the issuer's `jwks_uri`, with
+key rotation), issuer (the embedded server, or one in `lws.oauth.trusted-issuers`, whose metadata is
+read from its `/.well-known/lws-configuration`), audience (exactly one value, this storage), and
+`exp`/`nbf`/`iat`, and requires `sub`, `client_id` and `jti`.
+
+**Credentials presented directly** — this server's behaviour before the baseline, and an additional
+mechanism lws10-core permits — are still accepted unless
+`lws.oauth.accept-authentication-credentials=false`. A single orchestrator routes each credential to
+the right suite by shape and returns the authenticated principal, which is carried on the request and
+read by the authorization layer:
 
 | Suite | Credential | Verification key comes from |
 |---|---|---|
-| **OpenID Connect** | signed JWT (`iss` ≠ `sub`) | the issuer's JWKS, via OIDC discovery — trusted because the subject's controlled-identifier document links *the subject itself* to an `lws:OpenIdProvider` service whose `serviceEndpoint` equals `iss` (`did:service`/`lws:service`; a provider named elsewhere in the document does not count) |
-| **SSI Controlled Identifier** | self-issued JWT (`sub`=`iss`=`client_id`, an HTTPS URL) | a `verificationMethod` (`publicKeyJwk`) selected by the JWT `kid` in the dereferenced controlled-identifier document |
-| **did:key** | self-issued JWT (`sub`=`iss`=`client_id`, a `did:key:` URI) | the public key encoded in the `did:key` identifier itself (Ed25519, P-256, secp256k1) — no network lookup |
+| **OpenID Connect** | signed JWT (`iss` ≠ `sub`) | the issuer's JWKS, via OIDC discovery — trusted because the subject's controlled-identifier document (JSON, as the suite's example writes it, or RDF) links *the subject itself* to an `lws:OpenIdProvider` service whose `serviceEndpoint` equals `iss` (a provider named elsewhere in the document does not count) |
+| **SSI Controlled Identifier** | self-issued JWT (`sub`=`iss`=`client_id`; an HTTPS URL, a `did:key` or a `did:web`) with `exp`, `iat` and a `kid` | the verification method the `kid` names among those the subject document's **`authentication`** relationship lists (CID 1.0 §3.3): controlled by the subject, a `JsonWebKey` or `Multikey`, not revoked or expired. A `did:key` expands to its DID document locally; a `did:web` is fetched from its `https://…/did.json` |
+| **did:key** (discontinued) | self-issued JWT whose `did:key` subject names no `kid` | the key the identifier encodes — kept, deprecated, for credentials minted before the SSI-CID suite subsumed this one |
 | **SAML 2.0** | signed SAML assertion (optionally base64) | a pre-configured trusted IdP key (out-of-band trust); the XML signature is validated, **bound to the assertion whose claims are read**, and `NameID`/`Issuer`/`Recipient` mapped to subject/issuer/client |
 
 All JWT suites reject `alg: none` and enforce `exp`. SAML trust is configured via
@@ -499,8 +563,10 @@ this storage's own IRI. A token whose `aud` names something else is always refus
 `lws.audience.require=false` — a token with no `aud` at all is refused too. This is what stops a
 credential presented here being replayed against another LWS storage, and stops an OpenID ID token
 minted for a different relying party of the same provider from authenticating as its subject here.
-Self-signed credentials (did:key, SSI-CID) are additionally capped at `lws.token.max-lifetime-seconds`,
-since their holder chooses their own expiry. Mint tokens accordingly — `DidKeyTool --audience <storage>`.
+Self-signed credentials (SSI-CID, did:key) are additionally capped at `lws.token.max-lifetime-seconds`,
+since their holder chooses their own expiry. Mint tokens accordingly — `DidKeyTool --audience <storage>`,
+which now names the verification method (`<did>#<multibase>`) as `kid`, so its credentials are
+self-signed CID credentials and can be exchanged at the token endpoint too.
 
 ### Authorization (Web Access Control)
 
@@ -562,15 +628,21 @@ console login applies the same check as the API.
 ### Notifications
 
 Discover support in the storage description (a `NotificationService` with a `serviceEndpoint` and
-`WebhookSubscription` type). Create a subscription with an authenticated POST to
-`/.lws/subscriptions`:
+`subscriptionType: ["WebhookSubscription"]`). Create a subscription with an authenticated
+`application/lws+json` POST to `/.lws/subscriptions`:
 
 ```json
-{ "type": "WebhookSubscription",
+{ "@context": ["https://www.w3.org/ns/lws/v1"],
+  "type": "WebhookSubscription",
   "topic": ["http://localhost:8080/some/container/"],
   "inbox": "https://example.org/inbox",
   "expires": "2026-12-31T00:00:00Z" }
 ```
+
+The answer is `201` with the subscription's `Location` and an `application/lws+json` body carrying
+`type`, `subscription` (its URL) and the `expires` the server applied. `GET` on the endpoint lists the
+caller's subscriptions as an LWS container; `GET` on a subscription returns its state and `DELETE`
+cancels it. RDF is still available by asking for it.
 
 Container topics are recursive. The server enforces that the subscriber may read every topic, and
 will not deliver a notification for a resource the subscriber cannot read — including on **delete**,
@@ -579,12 +651,28 @@ learns nothing about a private child that was deleted from it: not that it exist
 who removed it. That decision is also made with **no request context**: notification fan-out runs on
 the thread of whoever made the change, so the writer's `Origin` and `LWS-Purpose` are set aside
 first — a subscriber is not the app that happened to trigger the change, and an `acl:origin` rule
-scoped to that app does not apply to a webhook. On each change it POSTs
-a JSON-LD `lws:Notification` (wrapping an Activity Streams 2.0 `Create`/`Update`/`Delete`) to the
-inbox, signed with RFC 9421 HTTP Message Signatures (covering `@method @scheme @authority @path
-content-type content-digest`, with `created` + `keyid`). The signing public key is published at
-`/.lws/jwks`. Subscriptions may declare an `expires` instant; a background task purges expired
-subscriptions on the `lws.subscription.purge-interval-seconds` schedule.
+scoped to that app does not apply to a webhook. On each change it POSTs an `application/lws+json`
+notification in the lws10-core data model to the inbox:
+
+```json
+{ "@context": ["https://www.w3.org/ns/lws/v1", "https://www.w3.org/ns/activitystreams"],
+  "type": "Notification",
+  "storage": "http://localhost:8080/",
+  "activity": { "id": "urn:uuid:…", "type": ["Create"],
+                "object": { "id": "http://localhost:8080/some/container/new", "type": ["DataResource"] },
+                "target": "http://localhost:8080/some/container/",
+                "published": "2026-09-22T10:30:00.000Z" } }
+```
+
+`target` names the container a `Create` added to and `origin` the one a `Delete` removed from; the
+`actor` is omitted unless `lws.notifications.include-actor=true`, as the core's privacy
+considerations advise. Each delivery is signed with RFC 9421 HTTP Message Signatures (covering
+`@method @scheme @authority @path content-type content-digest`, with `created` + `keyid`). The
+`keyid` is the id of the signing key's verification method in the storage description —
+`<storage URI>#<thumbprint>` — so a receiver strips the fragment, dereferences the storage URI and
+finds the key there, as lws10-notifications-webhook specifies; it is also still in `/.lws/jwks`.
+Subscriptions may declare an `expires` instant; a background task purges expired subscriptions on the
+`lws.subscription.purge-interval-seconds` schedule.
 
 Because the `inbox` is chosen by the client, delivery is guarded like any other outbound fetch:
 `lws.webhook.*` refuses inboxes resolving to loopback, private, link-local or metadata addresses,
@@ -617,7 +705,8 @@ type or resource the client cannot read never appears, and `totalItems` counts o
 client cannot discover that a private type or resource exists. Responses are `Cache-Control:
 private, no-store`.
 
-A resource's types are its structural LWS type (`lws:Container` / `lws:DataResource`) plus any
+A resource's types are its structural LWS type (`lws:Container` / `lws:DataResource`), the types a
+client declared with `Link: rel="type"` on a write (lws10-index's preferred source), and any
 `rdf:type` its own representation asserts about itself (the resource IRI or a hash fragment of it).
 
 - **Type index** — `GET /.lws/type-index` lists the distinct types visible to the client:
@@ -625,30 +714,35 @@ A resource's types are its structural LWS type (`lws:Container` / `lws:DataResou
   { "@context": "https://www.w3.org/ns/lws/v1", "type": "TypeIndex", "totalItems": 5,
     "items": [ { "id": "https://schema.org/Person" }, { "id": "https://schema.org/Event" } ] }
   ```
-- **Type search** — equivalent `GET` and `POST` forms carrying a conjunctive-normal-form filter,
-  returning a synthetic `ContainerPage`. In the `GET` form a comma-separated value is OR and a
-  repeated parameter is AND; in the `POST` body a nested array is OR and the outer array is AND:
-  ```
-  GET /.lws/type-search?type=https://schema.org/Person,http://xmlns.com/foaf/0.1/Person&type=https://www.w3.org/ns/lws%23DataResource
-  ```
+- **Type search** — an HTTP `QUERY` (RFC 10008) whose body is an `application/lws-query+json`
+  filter, returning a synthetic `ContainerPage`. A nested array is OR and the outer array is AND:
   ```json
-  POST /.lws/type-search   Content-Type: application/lws+json
-  { "@context": "https://www.w3.org/ns/lws/v1",
-    "type": [ ["https://schema.org/Person", "http://xmlns.com/foaf/0.1/Person"],
+  QUERY /.lws/type-search   Content-Type: application/lws-query+json
+  { "type": [ ["https://schema.org/Person", "http://xmlns.com/foaf/0.1/Person"],
               "https://www.w3.org/ns/lws#DataResource" ] }
   ```
-  Both select `(schema:Person OR foaf:Person) AND lws:DataResource`. Beyond the mandatory `type`
-  baseline, a filter key that is an **absolute-URI predicate** matches a descriptive relation read
-  from the resource's representation (e.g. `&https%3A%2F%2Fex.org%2Fshape=…`); a relation the server
-  does not index simply yields no matches (never an error). Errors follow the spec: `415` for a POST
-  body that is not `application/lws+json`, `400` for a malformed filter / non-absolute-URI value /
-  over-complex filter, and `404` for a page past the last.
+  selects `(schema:Person OR foaf:Person) AND lws:DataResource`. The filter is plain JSON — an
+  `@`-member is ignored — and every key is optional: `{}` matches every resource the client may read.
+  Besides `type`, a key names a link relation, with the same grammar: a **registered name** such as
+  `describedby` matches the links the resource's metadata declares, and a **URI** matches those and
+  the triples its representation asserts with that predicate. A relation the server does not index
+  yields no matches, indistinguishably from a target nothing declares; the server-managed relations
+  are never indexed. `OPTIONS` answers `Allow: OPTIONS, QUERY` and `Accept-Query:
+  application/lws-query+json`. Page links are opaque and dereferenced with `GET` (they carry the
+  filter, not the authorization). Errors follow lws10-index: `400` for a missing `Content-Type`, a
+  malformed filter, an empty OR-group or a value that is not an absolute IRI; `415` (with
+  `Accept-Query`) for another query format; `422` for a filter past the complexity bound — never
+  silently narrowed —; `406` for an `Accept` that excludes JSON; `404` for a page link that is past
+  the last or no longer recognized. The `GET`/`POST` search forms of the drafts before July 2026 are
+  gone.
 
 ### Access Requests & Grants
 
 The storage description advertises an `AccessRequestService` and an `AccessGrantService` (each with a
 `serviceEndpoint` and the `conformsTo` access profile). Both are LWS containers served as
-`application/lws+json`:
+`application/lws+json` — their listings are container representations, paginated like any other,
+whose members are data resources typed `["DataResource", "AccessGrant"]` (or `AccessRequest`) with
+`format` `application/lws+json`:
 
 - **Request** — any authenticated agent `POST`s an `AccessRequest` to `/.lws/access-requests`
   (`201` + `Location`); the requester or a controller may `GET`/list/`DELETE` it.
@@ -666,11 +760,16 @@ A grant is **enforced** by a grant-aware authorizer layered over the base model 
 operation is permitted if the base permits it *or* an active grant authorizes it, so the assignee
 can act on the targets without any ACL edit, and deleting the grant withdraws the access
 immediately. Actions map to operations (`read`→GET/HEAD, `modify`→PUT/PATCH, `create`→POST,
-`delete`→DELETE); `assignee` may be `http://xmlns.com/foaf/0.1/Agent` for public access; `target`
-matches a resource exactly or, for a container value, its subtree. Constraints are evaluated
-fail-closed — `dateTime`, `client`, `mediaType`, `type` and `purpose` are honoured (`mediaType`/
-`type` from the target's metadata; `purpose` from a client-declared `LWS-Purpose` request header).
-Grants never confer `Control`.
+`delete`→DELETE); `assignee` may be `http://xmlns.com/foaf/0.1/Agent` for public access; a `target`
+`value` matches a resource exactly or, for a container value, its subtree, and the target's matcher
+`type` narrows that: `StorageResource` (the default) matches any resource, `DataResource` and
+`Container` only their own kind, and any other matcher is refused at creation. Constraints are
+evaluated fail-closed — `dateTime`, `client`, `format`, `type` and `purpose` are honoured (`format`
+and `type` from the target's metadata, `type` including the types its `Link` headers declare;
+`purpose` from a client-declared `LWS-Purpose` request header); `mediaType`, the `format` operand's
+name before August 2026, is still honoured. Grants never confer `Control`. As lws10-core's privacy
+considerations advise, a grant with a `client` constraint is not shown to its assignee through a
+different client.
 
 A grant carries only the authority of the agent who issued it, and that authority is **re-checked at
 every evaluation** rather than trusted from issuance: remove an issuer from `lws.owners`, or revoke
@@ -683,9 +782,9 @@ at startup, and how many are inert because their issuer no longer controls the s
 appears in no owner list and no ACL, so that count is the only place an operator inheriting a
 storage would see one. Audit them at `/.lws/access-grants`.
 
-On creation the server delivers a signed
-`lws:Notification` (an AS2 `Create` about the new document, RFC 9421-signed like a webhook) to the
-relevant inboxes: the document's own `inbox`, the configured controller inbox for a new request, and
+On creation the server delivers a signed notification (a `Create` activity about the new document,
+its `object` typed `["DataResource", "AccessGrant"]` or `AccessRequest`, RFC 9421-signed like a
+webhook) to the relevant inboxes: the document's own `inbox`, the configured controller inbox for a new request, and
 — for a grant that references its request via a `request` link — the associated request's inbox.
 
 ### SPARQL endpoint (optional)
@@ -749,9 +848,15 @@ control-lockout). The
 management UI is covered by [`LwsUiTest`](src/test/java/com/ebremer/lws/server/ui/LwsUiTest.java)
 (WicketTester): capability gating (anonymous / owner / non-owner), creating a resource through the
 form, and ACL editing. The authentication suites are covered by JUnit tests
-(`DidKeyValidatorTest`, `SsiCidValidatorTest`, `SamlValidatorTest`, `LwsCredentialValidatorTest`):
-valid Ed25519/P-256/RSA credentials are accepted and forged, expired, mismatched, untrusted-key
-and untrusted-issuer credentials are rejected. The OpenID Connect suite is covered by
+(`DidKeyValidatorTest`, `SsiCidValidatorTest`, `DidsAndMultikeyTest`, `SamlValidatorTest`,
+`LwsCredentialValidatorTest`): valid Ed25519/P-256/RSA credentials are accepted and forged, expired,
+mismatched, untrusted-key and untrusted-issuer credentials are rejected; the self-signed CID suite's
+CID 1.0 retrieval rules (only `authentication` methods, controller, revoked/expires, no published
+private key, `JsonWebKey` and `Multikey`) and its `did:key` and `did:web` subjects are each pinned.
+The authorization framework is covered end to end by
+[`LwsAuthorizationTest`](src/test/java/com/ebremer/lws/server/LwsAuthorizationTest.java): the
+metadata, a token exchange and every token-endpoint refusal, each access-token check against a stub
+external authorization server, a storage that accepts access tokens only, and DPoP-bound tokens. The OpenID Connect suite is covered by
 [`LwsOpenIdValidatorTest`](src/test/java/com/ebremer/lws/server/auth/LwsOpenIdValidatorTest.java)
 against an in-process [`MockOidcProvider`](src/test/java/com/ebremer/lws/server/auth/MockOidcProvider.java)
 (discovery + JWKS + controlled-identifier doc, minting RS256 ID tokens): a valid token from a
@@ -767,13 +872,15 @@ is accepted by the validator and the seed re-mints the same DID).
 Webhook delivery is covered end-to-end by
 [`WebhookDeliveryTest`](src/test/java/com/ebremer/lws/server/WebhookDeliveryTest.java): it boots the
 server plus a real HTTP inbox, subscribes, makes a change, and asserts the inbox receives a signed
-`lws:Notification` whose RFC 9421 HTTP Message Signature and RFC 9530 Content-Digest verify against
-the server's published JWKS Ed25519 key — exactly what a real subscriber would check.
+notification in the lws10-core data model whose RFC 9421 HTTP Message Signature and RFC 9530
+Content-Digest verify against the key it finds by following the receiver's steps in
+lws10-notifications-webhook — strip the `keyid`'s fragment, dereference the storage, look the
+verification method up — exactly what a real subscriber would check.
 
 The Type Index / Type Search services are covered by
 [`SearchIndexTest`](src/test/java/com/ebremer/lws/server/SearchIndexTest.java) (service discovery,
-the type index, GET/POST search with single/OR/AND/native-container/relation filters, GET≡POST
-equivalence, and the `415`/`400`/`404`/`405` error responses) and
+the type index, `QUERY` search with single/OR/AND/native-container/relation filters and the filter
+grammar's edge cases, page links, and the `400`/`404`/`405`/`406`/`415`/`422` error responses) and
 [`SearchIndexAuthzTest`](src/test/java/com/ebremer/lws/server/SearchIndexAuthzTest.java), which runs
 in owner mode with a `did:key` owner and asserts the security guarantees: an owner sees private
 types and resources while an anonymous client sees neither (cannot even learn they exist), plus the
@@ -783,11 +890,12 @@ Access Requests & Grants are covered by
 [`AccessGrantsTest`](src/test/java/com/ebremer/lws/server/AccessGrantsTest.java): a controller's
 grant lets another `did:key` agent read a resource it otherwise cannot (scoped to the granted
 action), revoking the grant withdraws the access, a public (`foaf:Agent`) grant admits an anonymous
-reader, `mediaType` and `purpose` constraints that gate the grant (by the target's media type and
-the client-declared `LWS-Purpose`), plus the request lifecycle, controller-only grant issuance,
-discovery advertisement, and the `401`/`403`/`415` cases.
+reader, `format` (and the former `mediaType`) and `purpose` constraints that gate the grant (by the
+target's media type and the client-declared `LWS-Purpose`), target matcher types, the container
+listing, client-bound grants hidden from other clients, plus the request lifecycle, controller-only
+grant issuance, discovery advertisement, and the `401`/`403`/`415` cases.
 [`AccessNotificationTest`](src/test/java/com/ebremer/lws/server/AccessNotificationTest.java) asserts
-the signed `lws:Notification` is delivered (with a matching Content-Digest) to the document's own
+the signed notification is delivered (with a matching Content-Digest) to the document's own
 `inbox`, to the configured controller inbox for a new request, and to a linked request's inbox for a
 grant that references it.
 
@@ -829,8 +937,13 @@ per-member authorization filtering of listings by
 
 The notable limitations and deliberate design choices are summarised below.
 
-- Tracks the LWS **Editor's Draft** (operations from the in-flux `Operations/` spec source); gaps
-  are filled with LDP/Solid conventions and may change.
+- Tracks the LWS **editor's drafts** — currently those of 21 September 2026 (`w3c/lws-protocol` @
+  `3ddc642`); gaps are filled with LDP/Solid conventions and may change. [COMPLIANCE.md](COMPLIANCE.md)
+  lists the deliberate departures.
+- The **storage URI is the root container's URI**, as lws10-core permits, so `/` has two
+  representations chosen by `Accept`: the storage description by default, the root listing for a
+  container type. A client that fetched `/` with no `Accept` and expected the listing now gets the
+  description; asking for `application/lws+json` (or RDF) gets the listing, as it always did.
 - Container listings are filtered per member by read authorization (`items` and `totalItems`
   reflect only the resources the client may read), so a listing is client-specific. The linkset
   resource stores its user-managed links as a JSON document and merges server-managed links on read.
@@ -870,6 +983,8 @@ The notable limitations and deliberate design choices are summarised below.
   would make the server fetch a URL — an SSRF vector) are blocked unless their host is in
   `lws.sparql-update.allowed-hosts`. N3 Patch (`text/n3`) is intentionally not implemented — the LWS
   Editor's Draft does not require it (JSON Merge Patch is the only PATCH format a server must support).
+  Refusing merge patch on RDF resources is a deliberate departure from lws10-core's "MUST minimally
+  support JSON Merge Patch", recorded in [COMPLIANCE.md](COMPLIANCE.md).
 - DPoP is enforced for the `DPoP` scheme (RFC 9449: proof signature, `htm`/`htu`, `iat` freshness,
   `jti` replay, `ath`, and `cnf.jkt` binding), with optional server-issued nonces (§8) via
   `lws.dpop.require-nonce` — a nonceless request is answered `401` + `DPoP-Nonce`. The `jti` replay
@@ -906,19 +1021,26 @@ The notable limitations and deliberate design choices are summarised below.
   neither produced nor verified (an unsupported inbound algorithm is ignored rather than rejected).
   Support is advertised both in-band (`Want-Content-Digest` on `OPTIONS`/write responses) and as a
   capability in the storage description.
-- Access **grants** are enforced for their `action`/`assignee`/`target` and all constraint types
-  (`dateTime`/`client`/`mediaType`/`type`/`purpose`). `acl:origin` and the `purpose` (`LWS-Purpose`
+- Access **grants** are enforced for their `action`/`assignee`/`target` (value and matcher type) and
+  all constraint types (`dateTime`/`client`/`format`/`type`/`purpose`). `acl:origin` and the `purpose` (`LWS-Purpose`
   header) are **client-declared**, not cryptographically attested — as is the nature of
   origin/purpose policy.
 - The Type Index / Type Search services serve resource **types** from an in-memory derived index,
   built lazily on first use and maintained incrementally from resource events (create/update/delete);
-  relation targets are not cached and are queried on demand for the predicates a search needs. Per
-  lws10-searchindex, type/relation membership may be eventually consistent — though synchronous event
+  relation targets are not cached and are queried on demand for the relations a search needs. Per
+  lws10-index, type/relation membership may be eventually consistent — though synchronous event
   delivery makes it read-your-writes in practice. **Authorization is never cached**: it is applied
   live, per request, over the index, so a revoked grant takes effect immediately, and `totalItems`
-  counts only the requesting client's authorized view. Descriptive-relation filtering is limited to
-  relations expressed as absolute-URI predicates in the resource's own representation;
-  structural/protocol relations are never indexed.
+  counts only the requesting client's authorized view. Descriptive relations are the links a
+  resource's metadata declares (registered names and URIs) and, for a URI, the predicate in its own
+  representation; structural/protocol relations are never indexed. Only the baseline
+  `application/lws-query+json` format is accepted; no alternate query format is offered.
+- The **authorization server** is deliberately minimal: token exchange only (no authorization-code
+  flow, no refresh tokens, no client registration — lws10-core identifies a client by the URI in its
+  credential), public clients, one signing key (`keys/oauth-es256.jwk`; delete it and restart to
+  rotate, which invalidates outstanding tokens at most `lws.oauth.access-token-lifetime-seconds`
+  early), and tokens for this storage only. An external authorization server must publish RFC 8414
+  metadata at `/.well-known/lws-configuration` and issue RFC 9068 (`typ: at+jwt`) tokens.
 - `buji-pac4j` is intentionally **not** used: its current release pulls the `javax`-servlet pac4j
   module, which is incompatible with this Jakarta (Servlet 6 / Jetty 12) stack. The pac4j filters are
   registered directly instead.

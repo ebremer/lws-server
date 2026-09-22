@@ -1,6 +1,7 @@
 package com.ebremer.lws.server;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.StringReader;
 import java.net.InetSocketAddress;
@@ -20,6 +21,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import com.sun.net.httpserver.HttpServer;
 import jakarta.json.Json;
+import jakarta.json.JsonObject;
 import jakarta.json.JsonReader;
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
 import org.bouncycastle.crypto.signers.Ed25519Signer;
@@ -140,22 +142,42 @@ class WebhookDeliveryTest {
         assertTrue(delivered.await(10, TimeUnit.SECONDS), "notification should be delivered to the inbox");
         Received r = received.get();
 
-        // Envelope is a signed lws:Notification with a Create activity about the new resource.
+        // The envelope is the lws10-core Notification Data Model, delivered as application/lws+json
+        // (lws10-notifications-webhook): a Notification naming the storage, wrapping one Create
+        // activity about the new resource, with the container it was added to as `target`.
         assertEquals("POST", r.method());
-        assertTrue(r.contentType().startsWith("application/ld+json"));
+        assertTrue(r.contentType().startsWith("application/lws+json"), r.contentType());
         String body = new String(r.body(), StandardCharsets.UTF_8);
-        assertTrue(body.contains("Notification"), body);
-        assertTrue(body.contains("Create"), body);
-        assertTrue(body.contains(resourceIri), body);
+        JsonObject envelope;
+        try (JsonReader reader = Json.createReader(new StringReader(body))) {
+            envelope = reader.readObject();
+        }
+        assertEquals(Json.createArrayBuilder().add("https://www.w3.org/ns/lws/v1")
+                .add("https://www.w3.org/ns/activitystreams").build(), envelope.getJsonArray("@context"));
+        assertEquals("Notification", envelope.getString("type"));
+        assertEquals(baseUrl + "/", envelope.getString("storage"));
+        JsonObject activity = envelope.getJsonObject("activity");
+        assertEquals(Json.createArrayBuilder().add("Create").build(), activity.getJsonArray("type"));
+        assertEquals(resourceIri, activity.getJsonObject("object").getString("id"));
+        assertEquals(Json.createArrayBuilder().add("DataResource").build(),
+                activity.getJsonObject("object").getJsonArray("type"));
+        assertEquals(baseUrl + "/", activity.getString("target"));
+        assertTrue(activity.containsKey("id") && activity.containsKey("published"), body);
+        assertFalse(activity.containsKey("actor"), "the actor is omitted by default (lws10-core privacy)");
 
         // Content-Digest matches the body (RFC 9530).
         String expectedDigest = "sha-256=:" + Base64.getEncoder().encodeToString(sha256(r.body())) + ":";
         assertEquals(expectedDigest, r.contentDigest());
 
-        // RFC 9421 signature verifies against the server's JWKS Ed25519 key.
+        // RFC 9421 signature, verified the way lws10-notifications-webhook tells a receiver to: the
+        // keyid is a URL with a fragment; without the fragment it is the storage identifier, which
+        // dereferences to the storage description; the key is the verification method whose id is
+        // the keyid.
         assertTrue(r.signatureInput() != null && r.signature() != null, "signature headers present");
-        byte[] publicKey = ed25519PublicKeyFromJwks();
         String params = r.signatureInput().substring(r.signatureInput().indexOf('=') + 1);
+        java.util.regex.Matcher keyid = java.util.regex.Pattern.compile("keyid=\"([^\"]+)\"").matcher(params);
+        assertTrue(keyid.find(), params);
+        byte[] publicKey = ed25519PublicKeyFromStorageDescription(keyid.group(1));
         String signatureBase = String.join("\n",
                 "\"@method\": POST",
                 "\"@scheme\": http",
@@ -174,13 +196,28 @@ class WebhookDeliveryTest {
         assertTrue(verifier.verifySignature(signature), "DPoP-style HTTP Message Signature must verify");
     }
 
-    private static byte[] ed25519PublicKeyFromJwks() throws Exception {
-        HttpResponse<String> jwks = http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/.lws/jwks")).build(),
-                HttpResponse.BodyHandlers.ofString());
-        try (JsonReader reader = Json.createReader(new StringReader(jwks.body()))) {
-            String x = reader.readObject().getJsonArray("keys").getJsonObject(0).getString("x");
-            return Base64.getUrlDecoder().decode(x);
+    /** The receiver's steps (lws10-notifications-webhook, Signature Verification), literally. */
+    private static byte[] ed25519PublicKeyFromStorageDescription(String keyid) throws Exception {
+        int hash = keyid.indexOf('#');
+        assertTrue(hash > 0, "the keyid must be a URL with a fragment: " + keyid);
+        String storage = keyid.substring(0, hash);
+        assertEquals(baseUrl + "/", storage, "the fragment-less keyid is the storage identifier");
+        HttpResponse<String> described = http.send(HttpRequest.newBuilder(URI.create(storage))
+                .header("Accept", "application/lws+cid").build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, described.statusCode());
+        try (JsonReader reader = Json.createReader(new StringReader(described.body()))) {
+            JsonObject doc = reader.readObject();
+            assertEquals(storage, doc.getString("id"), "the description's id matches the storage identifier");
+            for (var method : doc.getJsonArray("verificationMethod")) {
+                JsonObject vm = method.asJsonObject();
+                if (vm.getString("id").equals(keyid)) {
+                    assertTrue(doc.getJsonArray("authentication").toString().contains(keyid),
+                            "referenced from authentication");
+                    return Base64.getUrlDecoder().decode(vm.getJsonObject("publicKeyJwk").getString("x"));
+                }
+            }
         }
+        throw new AssertionError("no verification method " + keyid + " in the storage description");
     }
 
     /**

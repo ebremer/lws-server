@@ -8,18 +8,26 @@ import jakarta.servlet.http.HttpServletResponse;
 import com.ebremer.lws.server.notifications.WebhookKeys;
 
 /**
- * Publishes the server's webhook signing public key as a JWK Set so notification subscribers can
- * verify the HTTP Message Signatures on delivered notifications (the signature {@code keyid} is
- * the JWK thumbprint of this key).
+ * Publishes this server's public signing keys as a JWK Set: the embedded authorization server's
+ * access-token key — this is the {@code jwks_uri} of its metadata, where a storage validating one
+ * of its tokens finds the key — and the webhook key notification deliveries are signed with. The
+ * webhook key's authoritative publication is the storage description's {@code verificationMethod};
+ * it is listed here as well because it always has been.
  *
  * @author Erich Bremer
  */
 public final class JwksServlet extends HttpServlet {
 
-    private final transient WebhookKeys keys;
+    private final byte[] body;
 
+    /** A JWK Set holding only the webhook key. */
     public JwksServlet(WebhookKeys keys) {
-        this.keys = keys;
+        this(keys.publicJwkSetJson());
+    }
+
+    /** A JWK Set, as its JSON serialization. */
+    public JwksServlet(String jwkSetJson) {
+        this.body = jwkSetJson.getBytes(StandardCharsets.UTF_8);
     }
 
     @Override
@@ -34,7 +42,6 @@ public final class JwksServlet extends HttpServlet {
             resp.setStatus(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
             return;
         }
-        byte[] body = keys.publicJwkSetJson().getBytes(StandardCharsets.UTF_8);
         resp.setContentType("application/jwk-set+json");
         resp.setContentLength(body.length);
         resp.setHeader("Cache-Control", "public, max-age=3600");

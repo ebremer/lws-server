@@ -24,8 +24,8 @@ import com.ebremer.lws.server.vocab.LWS;
 
 /**
  * Implements the LWS Type Index and Type Search services, per
- * <a href="https://w3c.github.io/lws-protocol/lws10-searchindex/">LWS Search and Type Index
- * Services</a>.
+ * <a href="https://w3c.github.io/lws-protocol/lws10-index/">LWS Search and Type Index Services</a>
+ * (lws10-index, formerly lws10-searchindex).
  *
  * <p>A resource's <em>types</em> are derived from two sources, treated identically:
  * <ul>
@@ -36,10 +36,13 @@ import com.ebremer.lws.server.vocab.LWS;
  * </ul>
  *
  * <p>An optional descriptive <em>relation</em> filter matches resources that link to a target via a
- * given predicate, again read from the resource's own representation. Only relations expressed as
- * absolute-URI predicates are indexed; structural/protocol relations live in a separate
- * administrative graph and are therefore never matched, satisfying the spec's prohibition on
- * indexing them. A relation the server does not index simply yields no matches.
+ * given relation. The key is a registered relation name (RFC 8288) or, for an extension relation,
+ * its URI, and the targets come from every source lws10-index names, treated identically: the links
+ * the client declared in the resource's metadata (its {@code Link} headers and linkset) for either
+ * kind of key, and — for a URI key — the triples the resource's own representation asserts with that
+ * predicate. Structural and protocol relations are never answered: the server-managed links are
+ * refused by the linkset service, and the administrative graph is never read. A relation the server
+ * does not index yields no matches, indistinguishably from a target nothing declares.
  *
  * <p>Resource <em>types</em> are served from an in-memory derived index, built lazily on first use
  * and maintained incrementally from resource events. Type/relation membership may therefore be
@@ -194,24 +197,16 @@ public final class SearchIndexService implements ResourceEventListener {
     /**
      * The resources matching {@code filter} that {@code principal} may read, paginated.
      *
-     * <p>A filter with no type clause is refused. lws10-searchindex makes the type clause the
-     * mandatory baseline of a type search — it is what {@link Clause#type} already calls itself, and
-     * what this class's own javadoc has always said — but nothing enforced it: {@code GET
-     * /.lws/type-search} with no parameters at all produced {@link Filter#MATCH_ALL}, which
-     * {@link #matches} satisfies vacuously, so the endpoint enumerated every resource in the storage
-     * the caller could read. That is not a disclosure bug (each match is authorization-filtered and
-     * {@code totalItems} counts only the permitted view) but it is a search endpoint answering
-     * "everything", and every such request costs one authorization decision per resource in the
-     * store.
+     * <p>A filter with no clauses matches every resource the caller may read. This server used to
+     * refuse it, when the draft made the type clause mandatory; lws10-index now says in so many
+     * words that a request with no type key and no relation keys "matches all resources visible to
+     * the client". It stays safe for the reason it always was: every match is
+     * authorization-filtered and {@code totalItems} counts only the permitted view.
      */
     public Page<Match> typeSearch(LwsPrincipal principal, Filter filter, int page, int pageSize) {
-        if (filter.clauses().stream().noneMatch(Clause::isType)) {
-            throw LwsException.badRequest(
-                    "A type search requires at least one \"type\" clause naming the types to match");
-        }
         Map<String, Set<String>> typesByResource = typeView();
         Set<String> relationPredicates = filter.clauses().stream()
-                .filter(c -> !c.isType() && isAbsoluteUri(c.relation()))
+                .filter(c -> !c.isType())
                 .map(Clause::relation)
                 .collect(Collectors.toSet());
         Map<String, Map<String, Set<String>>> relations = relationPredicates.isEmpty()
@@ -233,6 +228,32 @@ public final class SearchIndexService implements ResourceEventListener {
         }
         matches.sort(Comparator.comparing(Match::iri));
         return paginate(matches, page, pageSize);
+    }
+
+    /**
+     * Whether {@code value} matches the IRI production of RFC 3987 — an absolute IRI, optionally
+     * with a fragment — which is what lws10-index requires of every type and relation target in a
+     * filter; anything else is refused with {@code 400}.
+     */
+    public static boolean isAbsoluteIri(String value) {
+        if (value == null || value.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            // Excluded from RFC 3987 outright: controls, space and the delimiters it never allows.
+            if (c <= 0x20 || c == 0x7f || "<>\"{}|\\^`".indexOf(c) >= 0) {
+                return false;
+            }
+        }
+        try {
+            // isReference, not isAbsolute: Jena's isAbsolute is RFC 3986's absolute-URI, which has
+            // no fragment — and lws10-index allows one ("an absolute IRI, optionally carrying a
+            // fragment identifier, the form of every IRI in the RDF abstract syntax").
+            return org.apache.jena.irix.IRIx.create(value).isReference();
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /** A syntactically valid absolute URI (has a scheme), e.g. an {@code http(s)} IRI. */
@@ -400,12 +421,28 @@ public final class SearchIndexService implements ResourceEventListener {
         return types;
     }
 
-    /** Relation targets for the given predicates, restricted to known resource graphs. */
+    /**
+     * Relation targets for the given relation keys, restricted to known resources: the links each
+     * resource's metadata declares for the relation, plus — for a key that is a URI — the objects
+     * its own representation asserts with that predicate.
+     */
     private Map<String, Map<String, Set<String>>> loadRelations(RDFConnection conn,
             Set<String> predicates, Set<String> resources) {
         Map<String, Map<String, Set<String>>> relations = new HashMap<>();
+        LinksetService meta = linksets;
         for (String predicate : predicates) {
             Map<String, Set<String>> byResource = new HashMap<>();
+            if (meta != null) {
+                meta.declaredRelationTargets(conn, predicate).forEach((iri, targets) -> {
+                    if (resources.contains(iri)) {
+                        byResource.computeIfAbsent(iri, k -> new HashSet<>()).addAll(targets);
+                    }
+                });
+            }
+            if (!isAbsoluteUri(predicate)) {
+                relations.put(predicate, byResource); // a registered name has no triple form
+                continue;
+            }
             ParameterizedSparqlString rel = new ParameterizedSparqlString();
             rel.setCommandText("""
                     SELECT DISTINCT ?g ?o WHERE {
