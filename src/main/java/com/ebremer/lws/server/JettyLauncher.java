@@ -27,6 +27,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.ebremer.lws.server.auth.Pac4jSupport;
 import com.ebremer.lws.server.http.AccessServlet;
+import com.ebremer.lws.server.http.BasePathRedirectFilter;
 import com.ebremer.lws.server.http.CorsFilter;
 import com.ebremer.lws.server.http.JwksServlet;
 import com.ebremer.lws.server.http.LwsResourceServlet;
@@ -275,6 +276,10 @@ public final class JettyLauncher {
         // Jetty's default is -1 (never expire), unlike the Spring path's 30 minutes: an unbounded
         // in-memory session cache is an unauthenticated memory leak for any visitor to /app.
         sessions.setMaxInactiveInterval(1800);
+        // Under a path prefix the cookie belongs to that path, not to every site on the host.
+        if (!config.basePath().isEmpty()) {
+            sessions.setSessionPath(config.basePath());
+        }
 
         EnumSet<DispatcherType> req = EnumSet.of(DispatcherType.REQUEST);
 
@@ -303,6 +308,12 @@ public final class JettyLauncher {
 
         // Filters (order matters: authentication first, then UI security, then Wicket).
         context.addFilter(new FilterHolder(c.authenticationFilter()), "/*", req);
+        // Ahead of pac4j and Wicket: puts the base URI's path back into their redirects.
+        BasePathRedirectFilter basePath = BasePathRedirectFilter.forConfig(config);
+        if (basePath != null) {
+            context.addFilter(new FilterHolder(basePath), LwsConfiguration.UI_PREFIX + "/*", req);
+            context.addFilter(new FilterHolder(basePath), LwsConfiguration.CALLBACK_PATH, req);
+        }
         if (c.pac4jConfig() != null) {
             context.addFilter(new FilterHolder(new SecurityFilter(c.pac4jConfig(), Pac4jSupport.CLIENT_NAME)),
                     Pac4jSupport.LOGIN_PATH, req);

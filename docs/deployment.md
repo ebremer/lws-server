@@ -110,11 +110,9 @@ Check it from outside: `curl https://example.org/lws/` returns the storage descr
 returns metadata whose `issuer` is `https://example.org/lws`, and an anonymous request to a private
 resource gets `WWW-Authenticate: Bearer as_uri="https://example.org/lws", realm="https://example.org/lws/"`.
 
-{: .warning }
-> **The [management UI](management-ui.md) does not work under a path prefix.** Its redirects are
-> built from the server-relative path, so they leave the prefix out (`/lws/app/` redirects to
-> `/app/browse`). The storage API is unaffected. Publish the server at the root of a host if you
-> need the console.
+The [management UI](management-ui.md) works under the prefix too (`https://example.org/lws/app/`):
+its redirects are moved back under `lws.base-uri`, and its session cookie is scoped to `/lws`, so
+the other site on the host never receives it.
 
 If the host already sets CORS headers for the whole site (for example `Header always set
 Access-Control-Allow-Origin *` on `<Location />`), those apply to `/lws/` too and replace the

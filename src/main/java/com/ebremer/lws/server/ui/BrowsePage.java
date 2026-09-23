@@ -155,7 +155,9 @@ public final class BrowsePage extends BasePage {
         // The tag of the version this page is showing. Saving quotes it back, so a save from a page
         // rendered before someone else's change is refused rather than silently overwriting it
         // (finding M20) — the console is held to the same conditional-write rule as the HTTP API.
-        final String renderedEtag = rr.meta().etag();
+        // rr is null when the read failed (not signed in, not found); the error box shows why, and
+        // every box that would use the tag is hidden.
+        final String renderedEtag = rr == null ? null : rr.meta().etag();
         Form<Void> editForm = new Form<>("editForm") {
             @Override
             protected void onSubmit() {
@@ -183,7 +185,7 @@ public final class BrowsePage extends BasePage {
         binaryBox.add(new Label("bsize", isBinary ? String.valueOf(rr.meta().size()) : ""));
         binaryBox.add(new ExternalLink("download", iri));
         FileUploadField replaceFile = new FileUploadField("replaceFile");
-        final String binaryEtag = rr.meta().etag();
+        final String binaryEtag = rr == null ? null : rr.meta().etag();
         Form<Void> replaceForm = new Form<>("replaceForm") {
             @Override
             protected void onSubmit() {
