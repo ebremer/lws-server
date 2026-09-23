@@ -183,7 +183,11 @@ public final class LwsConfiguration {
         String base = get(p, "lws.base-uri", "http://localhost:8080");
         URI baseUriParsed = requireBaseUri(base);
         this.baseUri = stripTrailingSlash(base);
-        this.port = baseUriParsed.getPort() > 0 ? baseUriParsed.getPort() : 8080;
+        // The listen port defaults to the port written in the base URI. Behind a reverse proxy the
+        // base URI is the external address (e.g. https://host/lws), whose port says nothing about
+        // where the proxy forwards to, so lws.listen-port can name that port separately.
+        this.port = getInt(p, "lws.listen-port",
+                baseUriParsed.getPort() > 0 ? baseUriParsed.getPort() : 8080, 1, 65535);
         this.dataDir = getPath(p, "lws.data-dir", "lws-data");
         this.systemPrefix = "/" + get(p, "lws.system-prefix", ".lws").replaceAll("^/+", "").replaceAll("/+$", "");
         this.ownerWebIds = parseSet(get(p, "lws.owners", ""));
@@ -845,6 +849,7 @@ public final class LwsConfiguration {
         return baseUri;
     }
 
+    /** The HTTP listen port: {@code lws.listen-port}, else the port of {@code lws.base-uri}, else 8080. */
     public int port() {
         return port;
     }
