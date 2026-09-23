@@ -39,4 +39,6 @@ Separately from this endpoint, an RDF resource can be edited with SPARQL 1.1 Upd
 `PATCH` with `Content-Type: application/sparql-update` (see the [HTTP API](http-api.md)). That path is
 fully access-controlled, and its `LOAD` / `SERVICE` operations — which would make the server fetch a
 URL (an SSRF vector) — are blocked unless the target host is in `lws.sparql-update.allowed-hosts`
-(empty by default ⇒ blocked entirely). See [Security](security.md).
+(empty by default ⇒ blocked entirely). An update that names a graph (`GRAPH`, `WITH`, `USING`, or
+graph management) is refused with `400`, since a resource is a single graph. See
+[Security](security.md).
