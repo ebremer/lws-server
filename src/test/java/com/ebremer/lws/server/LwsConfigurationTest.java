@@ -102,6 +102,13 @@ class LwsConfigurationTest {
     }
 
     @Test
+    void listenPortDefaultsToBaseUriPortAndCanBeOverridden() {
+        assertEquals(9090, of("http://localhost:9090").port());
+        assertEquals(8080, of("https://storage.example/lws").port());
+        assertEquals(8181, of("https://storage.example/lws", "lws.listen-port", "8181").port());
+    }
+
+    @Test
     void rejectsOutOfRangePort() {
         LwsConfigurationException ex = assertThrows(LwsConfigurationException.class,
                 () -> of("https://storage.example", "lws.tls.port", "70000"));

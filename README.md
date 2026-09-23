@@ -135,7 +135,7 @@ mvn dependency:build-classpath -Dmdep.outputFile=target/cp.txt
 java -cp "target/classes:$(cat target/cp.txt)" com.ebremer.lws.server.JettyLauncher
 ```
 
-The server listens on the port in `lws.base-uri` (default `http://localhost:8080`).
+The server listens on the port in `lws.base-uri` (default `http://localhost:8080`), or on `lws.listen-port` when that is set.
 
 ## Configuration
 
@@ -149,6 +149,7 @@ exception. Key settings:
 | Property | Default | Meaning |
 |---|---|---|
 | `lws.base-uri` | `http://localhost:8080` | Public base IRI; also sets the listen port |
+| `lws.listen-port` | port of `lws.base-uri`, else `8080` | HTTP listen port, when it differs from the base URI (behind a reverse proxy) |
 | `lws.data-dir` | `lws-data` | Directory for TDB2, blobs and keys |
 | `lws.owners` | *(empty)* | Space/comma-separated owner WebIDs. **Empty ⇒ refuses to start** unless `lws.dev.open=true` |
 | `lws.dev.open` | `false` | Permit development-only postures: empty `lws.owners` (open mode) and `lws.ui.dev-login` off-loopback |
