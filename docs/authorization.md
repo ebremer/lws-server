@@ -9,21 +9,33 @@ nav_order: 8
 1. TOC
 {:toc}
 
-Every access decision goes through a pluggable `Authorizer`. Two models are available via
-`lws.access-control`, and **access grants** layer on top of whichever is chosen.
+Every access decision goes through a pluggable `Authorizer`, consulted by the service layer so that
+the HTTP API, the management UI and the search services enforce exactly the same rules. Two models
+are available via `lws.access-control`, and [access grants](access-requests.md) layer on top of
+whichever is chosen. Who the caller *is* comes from [Authentication](authentication.md).
 
 ## Owner mode (default)
 
-`lws.access-control=OWNER` is single-tenant: the identities in `lws.owners` have full control; others
-get public-read when `lws.public-read=true`. With **no owners configured the storage is in open
-mode** (all reads and writes permitted) — fine for local development, not for production.
+`lws.access-control=OWNER` is single-tenant: the identities in `lws.owners` (WebIDs or DIDs) have
+full control. Everyone else can read the storage only when `lws.public-read=true`, which is
+**storage-wide** and defaults to `false`. To open a single resource or subtree to the world, issue an
+[access grant](access-requests.md) with `assignee` `http://xmlns.com/foaf/0.1/Agent` instead;
+deleting it closes the access again on the next request.
+
+> **The server refuses to start with no `lws.owners`.** An empty owner list is *open mode* — every
+> read, write and control decision permitted for every client, anonymous included. It is still
+> available for development, but has to be asked for with `lws.dev.open=true`. Open mode has no
+> storage *controller*, so access grants cannot be issued in it at all.
+{: .warning }
 
 ## Web Access Control (WAC)
 
 Set `lws.access-control=wac` for multi-user authorization via
 [Web Access Control](https://solidproject.org/TR/wac). Each resource may have an ACL resource
-(`<resource>.acl`, or `<container>/.acl`), discoverable via the `Link: rel="acl"` header. ACLs are
-RDF documents containing `acl:Authorization` rules:
+(`<resource>.acl`, or `<container>/.acl`), discoverable via the `Link: rel="acl"` header. That is the
+address the ACL is read and written at; the graph itself is kept in the server-internal
+`urn:x-lws:acl:` namespace, so no resource a client creates can ever be its own governing ACL. ACLs
+are RDF documents containing `acl:Authorization` rules:
 
 ```turtle
 @prefix acl: <http://www.w3.org/ns/auth/acl#> .
@@ -49,64 +61,53 @@ RDF documents containing `acl:Authorization` rules:
 - **Agents**: `acl:agent <webid>`; `acl:agentClass foaf:Agent` (everyone, incl. anonymous) or
   `acl:AuthenticatedAgent` (any signed-in agent); or `acl:agentGroup <group>` — membership is resolved
   by dereferencing the group document (from the local store, or over HTTP for an external group,
-  subject to the [SSRF guard](security.md)) and checking `vcard:hasMember`, cached briefly.
-- **`acl:origin`** restricts a rule to a browser/app `Origin` (note: client-declared, not attested).
+  subject to the [SSRF guard](security.md#ssrf-guards)) and checking `vcard:hasMember`.
+- **Group resolution** is cached for `lws.wac.group-cache-seconds` (default 300). An external group
+  document is fetched *before* the storage transaction that needs the decision opens, never inside
+  it, so a slow host cannot stall writes. A group that cannot be resolved simply does not match (its
+  authorization is skipped; the others still apply), is not remembered as empty, and is not retried
+  for `lws.wac.group-failure-cache-seconds` (default 30). One decision dereferences at most
+  `lws.wac.max-group-fetches-per-decision` (default 8) documents.
+- **`acl:origin`** restricts a rule to a browser/app `Origin` (client-declared, not attested). A
+  browser application needs *both* its origin in `lws.cors.allowed-origins` (so the browser lets it
+  read responses) and, if the ACL restricts by origin, a matching `acl:origin`.
 - **Resolution**: a resource's own ACL (`acl:accessTo`) wins; otherwise the nearest ancestor
   container's ACL applies through `acl:default` (inheritance), up to the root. The nearest ACL fully
   overrides ancestors — there is **no super-owner**, so include yourself when delegating a subtree.
-- **Bootstrap**: the root ACL is created at startup from `lws.owners` (Read/Write/Control + public
-  Read if `lws.public-read`); with no owners the root is opened to the public (development).
+- **Bootstrap**: the root ACL is created at startup from `lws.owners` (Read/Write/Control, plus
+  public Read if `lws.public-read`). With no owners — which requires `lws.dev.open=true` — the root is
+  opened to the public instead; that development ACL is marked as such and is **rebuilt** from
+  `lws.owners` the first time the server starts with owners configured. A root ACL you wrote yourself
+  carries no marker and is never rebuilt (the server warns if it grants everyone `acl:Control`).
 - Editing an ACL requires `acl:Control` on its target (ACLs are not themselves access-controlled,
   avoiding infinite regress).
 
-To onboard a user, point them at their OIDC issuer (their WebID document must advertise an
-`lws:OpenIdProvider` service for that issuer — see [Authentication](authentication.md)) and grant
-their WebID the modes they need in the relevant ACLs.
+To onboard a user, point them at their OIDC issuer — their WebID document must link that WebID (the
+exact IRI the token's `sub` carries) to an `lws:OpenIdProvider` service for that issuer, see
+[Authentication](authentication.md) — and grant their WebID the modes they need in the relevant ACLs.
+Self-sovereign users can instead authenticate with a controlled identifier (`did:key`, `did:web` or
+an HTTPS CID document) and be named by that identifier.
+
+## What callers see when they may not
+
+- An **anonymous** client that lacks access gets `401` with the `as_uri`/`realm` challenge, so it can
+  discover how to authenticate.
+- An **authenticated** principal without Read gets `404` for a resource that exists, the same as for
+  one that does not, and the `Allow` header on `OPTIONS` and `405` stops reporting its type —
+  `lws.mask-forbidden-as-not-found` (default `true`). Set it to `false` to answer `403` instead. A
+  principal who may read but not write still gets `403` for the write.
+- **Container listings** are filtered per member by read authorization: `items` and `totalItems`
+  reflect only the resources the client may read, so a listing is client-specific. The
+  [type index and type search](search-type-index.md) apply the same per-request check.
+
+> Under WAC, the anonymous `401`/`404` split can still reveal *where* ACLs sit; no status-code
+> masking can hide that.
+{: .note }
 
 ## Access Requests & Grants
 
-The storage description advertises an `AccessRequestService` and an `AccessGrantService` (each with a
-`serviceEndpoint` and a `conformsTo` access profile). Both are LWS containers served as
-`application/lws+json`.
-
-- **Request** — any authenticated agent `POST`s an `AccessRequest` to `/.lws/access-requests`
-  (`201` + `Location`); the requester or a controller may `GET`/list/`DELETE` it.
-- **Grant** — a storage controller `POST`s an `AccessGrant` to `/.lws/access-grants`; deleting it
-  revokes the grant.
-
-```json
-POST /.lws/access-grants    Content-Type: application/lws+json    (storage controller)
-{
-  "@context": "https://www.w3.org/ns/lws/v1",
-  "type": ["AccessGrant"],
-  "storage": "http://localhost:8080/",
-  "access": [
-    { "type": ["AccessPolicy"], "action": ["read"],
-      "assignee": "https://bob.example/me",
-      "target": { "type": "StorageResource", "value": ["http://localhost:8080/doc"] } }
-  ]
-}
-```
-
-### How grants are enforced
-
-A grant is enforced by a **grant-aware authorizer layered over the base model** (owner or WAC): an
-operation is permitted if the base permits it *or* an active grant authorizes it. So an assignee can
-act on the targets **without any ACL edit**, and deleting the grant withdraws the access immediately.
-
-- **Actions** map to operations: `read` → GET/HEAD, `modify` → PUT/PATCH, `create` → POST,
-  `delete` → DELETE.
-- **Assignee** may be `http://xmlns.com/foaf/0.1/Agent` for public access.
-- **Target** matches a resource exactly, or — for a container value — its whole subtree.
-- **Constraints** are evaluated fail-closed: `dateTime`, `client`, `mediaType`, `type` and `purpose`
-  are honoured (`mediaType`/`type` from the target's metadata; `purpose` from a client-declared
-  `LWS-Purpose` request header).
-- Grants **never** confer `Control`.
-
-On creation the server delivers a signed `lws:Notification` (an Activity Streams 2.0 `Create` about
-the new document, RFC 9421-signed like a webhook) to the relevant inboxes: the document's own `inbox`,
-the configured controller inbox for a new request, and — for a grant that references its request via a
-`request` link — the associated request's inbox. See [Notifications](notifications.md).
-
-> `acl:origin` and the access-grant `purpose` are **client-declared**, not cryptographically attested
-> — as is the nature of origin/purpose policy.
+Access requests and grants — the LWS way for an agent to ask for access and for a controller to give
+it without editing an ACL — have [their own page](access-requests.md). In short: a grant-aware
+authorizer is layered over the base model, so an operation is permitted if the base model permits it
+*or* an active grant authorizes it, and deleting the grant withdraws the access immediately. Grants
+never confer `Control`.

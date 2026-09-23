@@ -17,8 +17,15 @@ Every resource has a **linkset resource** at `<resource>.meta`
 
 The linkset merges:
 
-- **Server-managed links** — `type`, `up` (parent container), `linkset` (self) and the storage
-  description — generated on every read. A client **cannot** set or override these.
+- **Server-managed links** — `up` (parent container), `linkset` (self) and
+  `https://www.w3.org/ns/lws#storage` (the storage URI) — generated on every read. A client
+  **cannot** set or override these.
+- **`type`** is shared: the server always emits the structural type (`lws:Container` /
+  `lws:DataResource`) first, and a client may *add* its own types — e.g. declare that a document is a
+  `schema:Person`, which is how a binary resource gets a type at all. Nothing in the LWS namespace and
+  none of the LDP interaction models may be declared; those name what a resource is to the server.
+  Declared types also appear as `Link: rel="type"` on the resource and in container listings, and
+  are what [Type Search](search-type-index.md) matches.
 - **User-managed links** — any other relations a client sets, persisted in a dedicated metadata graph
   and removed automatically when the resource is deleted.
 
@@ -27,8 +34,10 @@ The linkset merges:
   "linkset": [
     {
       "anchor": "https://storage.example/alice/personalinfo.json",
-      "type":        [ { "href": "https://www.w3.org/ns/lws#DataResource" } ],
+      "type":        [ { "href": "https://www.w3.org/ns/lws#DataResource" },
+                       { "href": "https://schema.org/Person" } ],
       "up":          [ { "href": "https://storage.example/alice/" } ],
+      "https://www.w3.org/ns/lws#storage": [ { "href": "https://storage.example/" } ],
       "describedby": [ { "href": "https://shapes.example/personal-info" } ],
       "title": "Personal information"
     }
@@ -93,10 +102,11 @@ Two [RFC 7240](https://www.rfc-editor.org/rfc/rfc7240) preferences tune metadata
 
 | Target | `application/sparql-update` | `application/merge-patch+json` | `application/json-patch+json` |
 |---|:--:|:--:|:--:|
-| RDF resource | ✓ | ✓ (via JSON-LD) | — |
+| RDF resource | ✓ | — | — |
 | JSON (non-RDF) resource | — | ✓ | ✓ |
 | Linkset (`.meta`) | — | ✓ | ✓ |
 
-Merge Patch on an RDF resource is applied through its JSON-LD representation, so it is most
-predictable on simple/single-node shapes; use SPARQL Update for precise graph edits. N3 Patch
+JSON Merge Patch is not accepted on RDF resources — it is not defined over RDF — so SPARQL Update is
+the RDF patch format (an update that names a graph is refused with `400`: a resource is a single
+graph). The storage description's `PatchSupport` capability lists these pairs per `format`. N3 Patch
 (`text/n3`) is intentionally not implemented — the spec does not require it.

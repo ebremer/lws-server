@@ -56,6 +56,7 @@ Requires Ruby (3.x) and Bundler.
 | Metadata & Linksets | [`metadata-linksets.md`](metadata-linksets.md) |
 | Authentication | [`authentication.md`](authentication.md) |
 | Authorization | [`authorization.md`](authorization.md) |
+| Access Requests & Grants | [`access-requests.md`](access-requests.md) |
 | Notifications | [`notifications.md`](notifications.md) |
 | Search & Type Index | [`search-type-index.md`](search-type-index.md) |
 | SPARQL Endpoint | [`sparql-endpoint.md`](sparql-endpoint.md) |
