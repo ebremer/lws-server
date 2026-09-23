@@ -12,6 +12,7 @@ import org.springframework.boot.web.embedded.jetty.JettyServletWebServerFactory;
 import org.springframework.boot.web.server.WebServerFactoryCustomizer;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.ServletRegistrationBean;
+import org.springframework.boot.web.servlet.server.AbstractServletWebServerFactory;
 import org.springframework.boot.web.servlet.server.ConfigurableServletWebServerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -19,6 +20,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.ebremer.lws.server.auth.Pac4jSupport;
 import com.ebremer.lws.server.http.AccessServlet;
+import com.ebremer.lws.server.http.BasePathRedirectFilter;
 import com.ebremer.lws.server.http.CorsFilter;
 import com.ebremer.lws.server.http.JwksServlet;
 import com.ebremer.lws.server.http.LwsResourceServlet;
@@ -75,6 +77,11 @@ public class LwsServletConfig {
     public WebServerFactoryCustomizer<ConfigurableServletWebServerFactory> serverCustomizer(LwsComponents components) {
         return factory -> {
             factory.setPort(components.config().port());
+            // Under a path prefix the console's session cookie belongs to that path, not to the
+            // whole host, which may be serving other sites that have no business receiving it.
+            if (!components.config().basePath().isEmpty() && factory instanceof AbstractServletWebServerFactory a) {
+                a.getSession().getCookie().setPath(components.config().basePath());
+            }
             // Behind a TLS-terminating reverse proxy, add Jetty's ForwardedRequestCustomizer so the
             // request scheme/host and isSecure() reflect the X-Forwarded-* / Forwarded (RFC 7239)
             // headers from the proxy (mirrors JettyLauncher.httpConnector for the bare-Jetty path).
@@ -233,6 +240,26 @@ public class LwsServletConfig {
         bean.addUrlPatterns("/*");
         bean.setOrder(1);
         bean.setName("lwsAuth");
+        return bean;
+    }
+
+    /**
+     * Keeps the console's redirects under the path of {@code lws.base-uri} when a proxy strips it.
+     * Ahead of pac4j and Wicket, whose redirects it rewrites; not registered at the root of a host.
+     */
+    @Bean
+    public FilterRegistrationBean<Filter> basePathRedirectFilter(LwsComponents c) {
+        FilterRegistrationBean<Filter> bean = new FilterRegistrationBean<>();
+        BasePathRedirectFilter filter = BasePathRedirectFilter.forConfig(c.config());
+        if (filter == null) {
+            bean.setFilter((req, res, chain) -> chain.doFilter(req, res));
+            bean.setEnabled(false);
+            return bean;
+        }
+        bean.setFilter(filter);
+        bean.addUrlPatterns(LwsConfiguration.UI_PREFIX + "/*", LwsConfiguration.CALLBACK_PATH);
+        bean.setOrder(1);
+        bean.setName("lwsBasePathRedirect");
         return bean;
     }
 

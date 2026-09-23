@@ -849,6 +849,17 @@ public final class LwsConfiguration {
         return baseUri;
     }
 
+    /**
+     * The path of {@code lws.base-uri} without a trailing slash ({@code "/lws"} for
+     * {@code https://host/lws}), or {@code ""} when the storage is at the root of its host. A proxy
+     * strips it before the request reaches this server, so it is where the browser-facing session
+     * cookie belongs.
+     */
+    public String basePath() {
+        String path = URI.create(baseUri).getRawPath();
+        return path == null || path.equals("/") ? "" : path;
+    }
+
     /** The HTTP listen port: {@code lws.listen-port}, else the port of {@code lws.base-uri}, else 8080. */
     public int port() {
         return port;

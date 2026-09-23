@@ -42,6 +42,6 @@ Sign in at `/app/login` by:
   `lws.cors.allowed-origins` says; the console is same-origin only.
 
 {: .note }
-> The console needs the server published **at the root of a host**. Behind a proxy that maps it under
-> a path prefix (see [Deployment](deployment.md#under-a-path-prefix)) its redirects drop the prefix,
-> so it cannot be used there; the storage API works either way.
+> Under a path prefix (see [Deployment](deployment.md#under-a-path-prefix)) the console is at
+> `<base-uri>/app/`. Its redirects keep the prefix, even though the proxy strips it before the server
+> sees the request, and its session cookie is scoped to the prefix, so other sites on the same host never receive it.
