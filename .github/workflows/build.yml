@@ -1,9 +1,12 @@
 name: build
 
 on:
+  # docs/ is the GitHub Pages site, built by Pages itself; a docs-only change needs no Maven build.
   push:
     branches: ['**']
+    paths-ignore: ['docs/**']
   pull_request:
+    paths-ignore: ['docs/**']
   # A dependency that was fine on Friday can be withdrawn or found vulnerable by Monday, and
   # nothing in this repo would notice until someone happened to push.
   schedule:
