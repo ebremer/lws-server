@@ -9,10 +9,10 @@ lang: en
 # classic build (the "Deploy from a branch" source, which runs Jekyll 3.10 via the github-pages gem).
 remote_theme: just-the-docs/just-the-docs@v0.5.4
 
-# baseurl is the path the site is served under. For a project page at
-# https://<user>.github.io/lws-server-docs/ keep "/lws-server-docs". For a user/org page or a custom
-# domain set it to "". For local preview: bundle exec jekyll serve --baseurl ""
-baseurl: "/lws-server-docs"
+# baseurl is the path the site is served under. The site is published from the docs/ folder of the
+# lws-server repository, as the project page https://<user>.github.io/lws-server/. For a user/org
+# page or a custom domain set it to "". For local preview: bundle exec jekyll serve --baseurl ""
+baseurl: "/lws-server"
 
 plugins:
   - jekyll-remote-theme

@@ -4,6 +4,9 @@ A [Linked Web Storage](https://w3c.github.io/lws-protocol/) server implementing 
 Protocol, written as plain Jakarta servlets and bootstrapped (for now) by Spring Boot on an
 embedded Eclipse Jetty container.
 
+Documentation: **https://ebremer.github.io/lws-server/** (source in [`docs/`](docs/), a Jekyll site
+published by GitHub Pages from this repository).
+
 It implements:
 
 - **[LWS Core](https://w3c.github.io/lws-protocol/lws10-core/)** — the resource/containment model and CRUD operations.

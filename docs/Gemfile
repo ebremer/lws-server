@@ -4,7 +4,7 @@ source "https://rubygems.org"
 # Jekyll + plugin versions GitHub runs, and bundles jekyll-remote-theme (used to pull Just the Docs)
 # and jekyll-relative-links. The theme itself is set via `remote_theme:` in _config.yml.
 #
-# Local preview (serve at the site root rather than the /lws-server-docs baseurl):
+# Local preview, from this docs/ folder (serve at the site root rather than the /lws-server baseurl):
 #
 #   bundle install
 #   bundle exec jekyll serve --baseurl ""    # http://localhost:4000/

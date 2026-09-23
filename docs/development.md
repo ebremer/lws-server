@@ -55,6 +55,6 @@ The suite mixes fast unit tests with end-to-end tests that boot the real stack o
 
 ## Documentation
 
-This site is built from the Markdown in the
-[`lws-server-docs`](https://github.com/ebremer/lws-server-docs) repository — see its `README.md` for
+This site is built from the Markdown in the `docs/` folder of the
+[`lws-server`](https://github.com/ebremer/lws-server) repository — see `docs/README.md` for
 how to preview locally and publish via GitHub Pages.
