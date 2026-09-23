@@ -263,6 +263,38 @@ server {
 }
 ```
 
+### Under a path prefix
+
+The storage can share a host with another site (`https://example.org/lws/` beside a CMS at `/`). The
+proxy strips the prefix and `lws.base-uri` carries it, so every IRI the server mints includes it:
+
+```properties
+lws.base-uri=https://example.org/lws
+lws.listen-port=8090          # the base URI's port says nothing about where the proxy forwards
+lws.behind-proxy=true
+```
+
+Route three things to the server and nothing else: `/lws/…` → `/…` (prefix stripped), a redirect from
+`/lws` to `/lws/`, and `/.well-known/lws-configuration/lws` → `/.well-known/lws-configuration` — the
+[RFC 8414 §3.1](https://www.rfc-editor.org/rfc/rfc8414#section-3.1) metadata location for the issuer
+`https://example.org/lws`, which is where clients look. Apache:
+
+```apache
+RequestHeader set X-Forwarded-Proto "https"
+ProxyPreserveHost On
+RedirectMatch 301 ^/lws$ /lws/
+ProxyPass        /lws/ http://127.0.0.1:8090/ nocanon
+ProxyPassReverse /lws/ http://127.0.0.1:8090/
+ProxyPass /.well-known/lws-configuration/lws http://127.0.0.1:8090/.well-known/lws-configuration
+```
+
+The management console works under the prefix (`/lws/app/`): its redirects are moved back under
+`lws.base-uri` and its session cookie is scoped to the prefix. A site-wide CORS block on the host
+(e.g. `Header always set Access-Control-Allow-Origin *` on `<Location />`) overrides the server's own
+CORS policy under the prefix too. The docs site's
+[Deployment](https://ebremer.github.io/lws-server/deployment.html#under-a-path-prefix) page has an nginx
+version and more detail.
+
 ### Terminating TLS in the server (ACME / Let's Encrypt)
 
 As an alternative to a reverse proxy, the **bare-Jetty launcher** (`com.ebremer.lws.server.JettyLauncher`)

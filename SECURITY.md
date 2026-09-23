@@ -27,7 +27,10 @@ backport stream. If you are running it, run it from a recent commit.
 ## Scope
 
 In scope: anything reachable over HTTP against a correctly configured storage — the LWS protocol
-surface, the authentication suites (WebID/OIDC, DPoP, `did:key`, SAML), Web Access Control, access
+surface, the embedded authorization server (token exchange at `/.lws/token`, its RFC 8414 metadata and
+access-token validation), the authentication suites (OpenID Connect, SAML, self-signed controlled
+identifiers including `did:key` subjects, and the discontinued kid-less `did:key` suite still
+accepted), DPoP, Web Access Control, access
 grants, notifications and their outbound deliveries, the Wicket console, and the optional SPARQL
 endpoint.
 
@@ -36,7 +39,7 @@ Out of scope, because they are documented behaviour rather than defects:
 - `lws.dev.open=true`, which exists to permit two development postures and says so at startup;
 - `lws.ui.dev-login=true`, which is impersonation by design and is refused off-loopback and behind a
   proxy;
-- `lws.sparql.read-only=false`, which grants unauthenticated write access to the whole dataset by
+- `lws.sparql.endpoint.read-only=false`, which grants unauthenticated write access to the whole dataset by
   request;
 - allow-listing a private host via `lws.webhook.allowed-hosts` or
   `lws.sparql-update.allowed-hosts`, which is how an operator deliberately opts into a target the
