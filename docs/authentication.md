@@ -60,7 +60,12 @@ The token endpoint validates the `subject_token` with the suite its `subject_tok
 | `urn:ietf:params:oauth:token-type:saml2` | SAML 2.0 |
 
 The credential's audience must name this authorization server (the storage's base URI) or its token
-endpoint. The issued token is an **RFC 9068 JWT** (`typ: at+jwt`, `ES256`) with `iss` this server,
+endpoint. Its **subject and its client must both be URIs**: lws10-core requires the access token's
+`client_id` to be a URI identifying the client, and for an OpenID Connect ID token that client is
+the `azp` claim (lws10-authn-openid). A plain client ID such as `my-app` is refused with
+`invalid_request` — *"the credential names no client, or its client is not a URI"* — so register
+the client at the identity provider under a URI client ID (for example
+`https://example.org/id/lws-client`). Keycloak accepts URIs as client IDs. The issued token is an **RFC 9068 JWT** (`typ: at+jwt`, `ES256`) with `iss` this server,
 `sub` and `client_id` the credential's subject and client, `aud` exactly the storage URI, and a
 lifetime of `lws.oauth.access-token-lifetime-seconds` (default 300 s) that never outlives the
 credential. Only this storage is a valid `resource` (anything else is `invalid_target`). Errors
