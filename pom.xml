@@ -40,7 +40,7 @@
 
         <!-- Spring Boot is used ONLY to bootstrap embedded Jetty. Keep its surface area tiny:
              when removing it later, only the bootstrap module and this version pin change. -->
-        <spring-boot.version>3.5.13</spring-boot.version>
+        <spring-boot.version>4.1.1</spring-boot.version>
 
         <jena.version>5.6.0</jena.version>
         <pac4j.version>6.1.2</pac4j.version>
