@@ -67,7 +67,8 @@ fine-grained access rules) decide who may do what.
 - **[Security](security.md)** — the consolidated security model and its limits.
 
 > **Specification baseline.** The server follows the LWS editor's drafts as of **21 September 2026**
-> (`w3c/lws-protocol` @ `3ddc642`). [COMPLIANCE.md](https://github.com/ebremer/lws-server/blob/master/COMPLIANCE.md)
+> (`w3c/lws-protocol` @ `3ddc642`), re-checked against the specifications of **28 September 2026**,
+> which made no normative change. [COMPLIANCE.md](https://github.com/ebremer/lws-server/blob/master/COMPLIANCE.md)
 > in the repository records what changed since the previous baseline and where the server departs
 > from the drafts, deliberately. Where the drafts are still silent the implementation follows the
 > LDP / Solid conventions it derives from (trailing-slash containers, `Link: rel="type"` interaction

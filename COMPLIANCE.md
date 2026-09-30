@@ -1,6 +1,9 @@
 # LWS Protocol Compliance: lws-server
 
-**Date:** 2026-09-22
+**Date:** 2026-09-22; **last re-reviewed 2026-09-30** against the specifications as they stood on
+**28 September 2026** (`w3c/lws-protocol` @ [`9b03b32`](https://github.com/w3c/lws-protocol/commit/9b03b32)).
+No normative text changed after the baseline, so no code change was needed; see
+[Re-review of 28 September 2026](#re-review-of-28-september-2026).
 **Specification baseline:** the LWS editor's drafts of **21 September 2026** — `w3c/lws-protocol` @
 [`3ddc642`](https://github.com/w3c/lws-protocol/commit/3ddc642) ("Clarify DID support in the SSI-CID
 authentication suite", #233).
@@ -26,16 +29,53 @@ scaffolding. Conformance here is to the text as it stands at the baseline commit
 
 ## Specification status
 
-| Specification | Status at the baseline | This server |
+| Specification | Status at the baseline | Latest on w3.org/TR, 28 Sep 2026 | This server |
+|---|---|---|---|
+| [lws10-core](https://w3c.github.io/lws-protocol/lws10-core/) | Editor's Draft, 21 Sep 2026 | Working Draft **21 Sep 2026** — the baseline text | Implemented; see below |
+| [lws10-vocab](https://w3c.github.io/lws-protocol/lws10-vocab/) | Draft (vocabulary 21 Sep 2026) | Group Note Draft 14 Jul 2026 (predates `StorageResource`; the live `ns/lws` namespace document has it) | Terms used as defined, `StorageResource` included |
+| [lws10-index](https://w3c.github.io/lws-protocol/lws10-index/) (was `lws10-searchindex`) | Draft, renamed 21 Sep 2026 | not published (editor's draft only) | Implemented, `QUERY` search |
+| [lws10-notifications-webhook](https://w3c.github.io/lws-protocol/lws10-notifications-webhook/) | Draft (split from `lws10-notifications`, 24 Jul 2026) | not published (editor's draft only) | Implemented |
+| [lws10-authn-openid](https://w3c.github.io/lws-protocol/lws10-authn-openid/) | Draft | Working Draft 3 Aug 2026 | Implemented, at the token endpoint and directly |
+| [lws10-authn-saml](https://w3c.github.io/lws-protocol/lws10-authn-saml/) | Draft | Working Draft 3 Aug 2026 | Implemented when an IdP certificate is configured |
+| [lws10-authn-ssi-cid](https://w3c.github.io/lws-protocol/lws10-authn-ssi-cid/) | Draft; DID subjects since 21 Sep 2026 | Working Draft **21 Sep 2026** — the baseline text | Implemented, with `did:key` and `did:web` subjects |
+| [lws10-authn-ssi-did-key](https://w3c.github.io/lws-protocol/lws10-authn-ssi-did-key/) | **Discontinued** 18 Sep 2026 | Working Draft 3 Aug 2026; published as a **Discontinued Draft on 29 Sep 2026** | Credentials without a `kid` still accepted, deprecated; not advertised |
+
+## Re-review of 28 September 2026
+
+Re-checked on 2026-09-30 against `w3c/lws-protocol` `main` at `9b03b32` (28 September 2026), the
+Working Drafts then on w3.org/TR, and the W3C namespace documents.
+
+**Nothing normative changed.** Four commits landed after the baseline, and none touches a
+specification's normative text:
+
+| Commit | Change | Effect here |
 |---|---|---|
-| [lws10-core](https://w3c.github.io/lws-protocol/lws10-core/) | Editor's Draft, 21 Sep 2026 | Implemented; see below |
-| [lws10-vocab](https://w3c.github.io/lws-protocol/lws10-vocab/) | Draft (DNOTE snapshot 14 Jul 2026, vocabulary 21 Sep 2026) | Terms used as defined, `StorageResource` included |
-| [lws10-index](https://w3c.github.io/lws-protocol/lws10-index/) (was `lws10-searchindex`) | Draft, renamed 21 Sep 2026 | Implemented, `QUERY` search |
-| [lws10-notifications-webhook](https://w3c.github.io/lws-protocol/lws10-notifications-webhook/) | Draft (split from `lws10-notifications`, 24 Jul 2026) | Implemented |
-| [lws10-authn-openid](https://w3c.github.io/lws-protocol/lws10-authn-openid/) | Draft | Implemented, at the token endpoint and directly |
-| [lws10-authn-saml](https://w3c.github.io/lws-protocol/lws10-authn-saml/) | Draft | Implemented when an IdP certificate is configured |
-| [lws10-authn-ssi-cid](https://w3c.github.io/lws-protocol/lws10-authn-ssi-cid/) | Draft; DID subjects since 21 Sep 2026 | Implemented, with `did:key` and `did:web` subjects |
-| [lws10-authn-ssi-did-key](https://w3c.github.io/lws-protocol/lws10-authn-ssi-did-key/) | **Discontinued** 18 Sep 2026 | Credentials without a `kid` still accepted, deprecated; not advertised |
+| #251, #252 (23 Sep) | The discontinued `did:key` suite's Discontinued Draft snapshot, dated 29 September: styling, and a note saying the SSI-CID suite subsumes it | None; divergence 5 stands |
+| #213 (25 Sep) | The README links the [LWS 1.0 test suite](https://github.com/lws-contrib/lws-test-suite) | None; see below |
+| #248 (28 Sep) | Wiki notes on the HTTP `QUERY` method (RFC 10008) | None; Type Search already uses `QUERY` |
+
+The Working Drafts of Core and the SSI-CID suite published on 21 September were built from `2b130c2`
+and `3ddc642`. Nothing under `lws10-core/` differs between those two commits, so what is published is
+the baseline text. The LWS JSON-LD context (`https://www.w3.org/ns/lws/v1`) still answers `404`, so
+divergence 9 stands.
+
+**The test suite cannot be used to check conformance yet.** `lws-contrib/lws-test-suite` is at
+`b8cb134` (20 September). As committed, several of its manifests have broken references and cannot
+be loaded. Its tests also encode the pre-core drafts: a `storageDescription` link, the description as
+`lws+json`, `200` from `DELETE`, and the `id_token` type for `did:key`. A server that follows the
+Working Draft fails those tests. Once the suite follows the Working Draft, running it here is the
+next conformance check.
+
+**Open upstream pull requests.** These are not part of the specifications as of 28 September.
+They are listed here because each would change what a storage server does:
+
+| PR | Proposes | This server today |
+|---|---|---|
+| #255 | JSON Patch (RFC 6902) replaces JSON Merge Patch as the baseline `PATCH` format, for resources and linksets | Already supports and advertises both, for resources and linksets. JSON Patch, like merge patch, is refused on RDF resources (divergence 2 would apply to it as well) |
+| #253 | The LWS container shape is required only for `application/lws+json`, no longer for plain `ld+json`/`json` | Serves all three; that still conforms if this merges |
+| #241 | Create into a missing container: `404` explicitly, with no intermediate containers | Already the case |
+| #237 | Moving a resource by `PATCH`ing its `up` link | Not implemented |
+| #162 | WebSocket and Server-Sent Events notification channels | Not implemented |
 
 ## What changed since the previous baseline
 

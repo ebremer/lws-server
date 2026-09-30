@@ -51,8 +51,18 @@ changed upstream since the previous baseline, and the deliberate divergences; th
 - [x] **D-12 · Declared types in `Link: rel="type"`** on `GET`/`HEAD`, and in container item types.
 - [ ] **D-13 · OpenID EdDSA and the algorithm allow-list** — still the low-tail item below; not a
   spec change.
-- [ ] **D-14 · Re-check against newer drafts.** Clone `w3c/lws-protocol` fresh and
-  `git log 3ddc642..` the `lws10-*` directories.
+- [x] **D-14 · Re-check against newer drafts** — done 2026-09-30 against `main` at `9b03b32`
+  (28 September 2026). Four commits since `3ddc642`, none normative (the did:key DISC snapshot, a
+  README link to the test suite, and wiki notes on `QUERY`), so no code change was needed. The
+  published Core and SSI-CID Working Drafts of 21 September are the baseline text.
+  `mvn -o clean test` → **569 tests, 0 failures**. COMPLIANCE.md's "Re-review of 28 September 2026"
+  has the account, and the open PRs that would change server behaviour (#255 JSON Patch baseline,
+  #253, #241, #237, #162).
+- [ ] **D-15 · Next re-check.** `git fetch` in `w3c/lws-protocol`, then
+  `git diff --stat 9b03b32 origin/main` and `gh pr list --repo w3c/lws-protocol --state merged`.
+  Watch #255 in particular: if it merges, JSON Patch becomes the MUST, and advertising it first in
+  the storage description is the only change. Also re-check `lws-contrib/lws-test-suite`, which
+  cannot be run against a server that follows the Working Draft as long as it is at `b8cb134`.
 
 ---
 
