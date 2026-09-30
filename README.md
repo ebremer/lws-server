@@ -29,7 +29,8 @@ It implements:
 - **[Access Requests & Grants](https://w3c.github.io/lws-protocol/lws10-core/#access-requests-and-grants)** — ODRL-based `AccessRequestService`/`AccessGrantService`; grants are enforced and revocable.
 
 > **Specification baseline:** the LWS editor's drafts as of **21 September 2026**
-> (`w3c/lws-protocol` @ `3ddc642`). See [COMPLIANCE.md](COMPLIANCE.md) for what changed since the
+> (`w3c/lws-protocol` @ `3ddc642`), re-checked against the specifications of **28 September 2026**
+> (`9b03b32`; no normative change). See [COMPLIANCE.md](COMPLIANCE.md) for what changed since the
 > previous baseline and where this server departs from the drafts, deliberately. Where the drafts
 > are still silent this implementation follows the **LDP / Solid Protocol conventions** it derives
 > from (trailing-slash containers, `Link: rel="type"` interaction models, content negotiation,
@@ -974,7 +975,7 @@ per-member authorization filtering of listings by
 The notable limitations and deliberate design choices are summarised below.
 
 - Tracks the LWS **editor's drafts** — currently those of 21 September 2026 (`w3c/lws-protocol` @
-  `3ddc642`); gaps are filled with LDP/Solid conventions and may change. [COMPLIANCE.md](COMPLIANCE.md)
+  `3ddc642`, re-checked unchanged as of 28 September 2026); gaps are filled with LDP/Solid conventions and may change. [COMPLIANCE.md](COMPLIANCE.md)
   lists the deliberate departures.
 - The **storage URI is the root container's URI**, as lws10-core permits, so `/` has two
   representations chosen by `Accept`: the storage description by default, the root listing for a
