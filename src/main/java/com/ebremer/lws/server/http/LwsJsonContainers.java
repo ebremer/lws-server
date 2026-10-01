@@ -10,6 +10,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import com.ebremer.lws.server.core.LwsException;
 import com.ebremer.lws.server.rdf.RdfFormats;
+import com.ebremer.lws.server.vocab.LWS;
 
 /**
  * Renders the server-managed LWS containers — the subscription listing and the access-request and
@@ -74,6 +75,10 @@ final class LwsJsonContainers {
 
     /** The container representation of one page, with its pagination links when there is more than one. */
     static JsonObject document(HttpServletResponse resp, String containerIri, Page page) {
+        // A client tells a container by its rel="type" link, as on any stored container; the
+        // access request and access grant endpoints "are LWS containers" (lws10-core), and the
+        // subscription list is one too.
+        resp.addHeader("Link", "<" + LWS.Container.getURI() + ">; rel=\"type\"");
         JsonArrayBuilder items = Json.createArrayBuilder();
         page.items().forEach(items::add);
         if (page.pages() > 1) {

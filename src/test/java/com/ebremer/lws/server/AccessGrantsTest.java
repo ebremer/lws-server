@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Properties;
 import java.util.Set;
 import jakarta.json.Json;
@@ -88,6 +89,22 @@ class AccessGrantsTest {
         }
         if (components != null) {
             components.close();
+        }
+    }
+
+    /**
+     * The access request and access grant endpoints are LWS containers (lws10-core), and so is the
+     * subscription list: their listings carry {@code Link: <lws#Container>; rel="type"}, the way a
+     * client recognises any container (Touchstone access-grant-endpoint-is-container).
+     */
+    @Test
+    void serviceListingsAreTypedAsContainers() throws Exception {
+        for (String path : List.of("/.lws/access-grants", "/.lws/access-requests", "/.lws/subscriptions")) {
+            HttpResponse<String> r = owner("GET", path, null, null, "Accept", "application/lws+json");
+            assertEquals(200, r.statusCode(), path + ": " + r.body());
+            assertTrue(r.headers().allValues("Link").stream().anyMatch(l ->
+                    l.contains("<https://www.w3.org/ns/lws#Container>") && l.contains("rel=\"type\"")),
+                    path + " Link: " + r.headers().allValues("Link"));
         }
     }
 
