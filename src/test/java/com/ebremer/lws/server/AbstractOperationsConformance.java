@@ -242,6 +242,40 @@ abstract class AbstractOperationsConformance {
                 "Content-Type", "application/merge-patch+json", "If-Match", "\"deadbeef00000000\"").statusCode());
     }
 
+    /**
+     * A merge patch in the RFC 9264 form a GET returns is understood, not silently ignored
+     * (Touchstone linkset-patch-merge): here the whole document read back, plus a license. An entry
+     * for another anchor is unprocessable, and a stale validator is a 412 before the body is read.
+     */
+    @Test
+    void linksetMergePatchInTheDocumentFormItWasReadIn() throws Exception {
+        assertEquals(201, send("PUT", "/ldoc", "<#it> <http://schema.org/name> \"x\" .",
+                "Content-Type", "text/turtle").statusCode());
+        HttpResponse<String> get = send("GET", "/ldoc.meta", null);
+        JsonObject entry = parse(get.body()).getJsonArray("linkset").getJsonObject(0);
+        String patch = "{\"linkset\":[" + jakarta.json.Json.createObjectBuilder(entry)
+                .add("license", jakarta.json.Json.createArrayBuilder().add(jakarta.json.Json
+                        .createObjectBuilder().add("href", "https://creativecommons.org/licenses/by/4.0/")))
+                .build() + "]}";
+
+        assertEquals(204, send("PATCH", "/ldoc.meta", patch, "Content-Type", "application/merge-patch+json",
+                "If-Match", get.headers().firstValue("ETag").orElseThrow()).statusCode());
+
+        HttpResponse<String> after = send("GET", "/ldoc.meta", null);
+        JsonObject a = parse(after.body()).getJsonArray("linkset").getJsonObject(0);
+        assertEquals("https://creativecommons.org/licenses/by/4.0/",
+                a.getJsonArray("license").getJsonObject(0).getString("href"));
+        assertEquals(entry.get("up"), a.get("up"), "server-managed links are untouched");
+
+        String other = "{\"linkset\":[{\"anchor\":\"" + baseUrl + "/elsewhere\","
+                + "\"license\":[{\"href\":\"https://x/\"}]}]}";
+        String etag = after.headers().firstValue("ETag").orElseThrow();
+        assertEquals(422, send("PATCH", "/ldoc.meta", other, "Content-Type", "application/merge-patch+json",
+                "If-Match", etag).statusCode());
+        assertEquals(412, send("PATCH", "/ldoc.meta", other, "Content-Type", "application/merge-patch+json",
+                "If-Match", "\"deadbeef00000000\"").statusCode());
+    }
+
     @Test
     void deletingAResourceRemovesItsLinkset() throws Exception {
         assertEquals(201, send("PUT", "/del", "<#it> <http://schema.org/name> \"x\" .",

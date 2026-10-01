@@ -65,6 +65,13 @@ The user-managed portion is updated with `application/merge-patch+json`
 with `428`, a stale one with `412`. A JSON Patch whose `test` operation fails or whose JSON Pointer is
 unresolvable yields `409`.
 
+A merge patch may be written in either of two shapes, which mean the same thing: the relation map
+(`{"license": [{"href": "…"}]}`), or the `application/linkset+json` document a `GET` returns
+(`{"linkset": [{"anchor": "…/doc", "license": [{"href": "…"}]}]}`), so a client can patch back what it
+read. In the document form every entry's `anchor` must be the resource itself (otherwise `422`), and its
+relations merge one at a time like the map's: a relation left out is left alone and `null` removes one.
+Server-managed relations are ignored in both.
+
 ```bash
 # add a user-managed relation (conditional)
 ETAG=$(curl -sI http://localhost:8080/doc.meta | grep -i '^etag' | tr -d '\r' | cut -d' ' -f2)
