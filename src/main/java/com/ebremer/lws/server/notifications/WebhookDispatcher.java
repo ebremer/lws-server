@@ -6,10 +6,12 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -35,15 +37,20 @@ import com.ebremer.lws.server.auth.OutboundFetchPolicy;
  *   <li>a <strong>bounded queue</strong> — it was unbounded, so a slow inbox let pending deliveries
  *       accumulate until the heap did;</li>
  *   <li>a <strong>per-host in-flight cap</strong> — two slowloris inboxes could otherwise occupy
- *       every worker and stall notifications for every other subscriber;</li>
+ *       every worker and stall notifications for every other subscriber. A delivery to a host at
+ *       its cap waits its turn in that host's line, and the next one goes as soon as one of the
+ *       host's deliveries finishes: the cap limits concurrency, it does not discard work. (It
+ *       used to drop the delivery, so a subscriber lost notifications whenever more than four
+ *       were going to the same host at once, the normal case for a shared webhook receiver.)</li>
  *   <li>a <strong>scheduled retry</strong> rather than {@code Thread.sleep} — backing off used to
  *       hold the worker, so one item could own a thread for the whole of
  *       {@code max-attempts × backoff} (about 95 seconds on the shipped defaults) while doing
  *       nothing.</li>
  * </ul>
- * Work refused by either bound is dropped and logged rather than queued indefinitely; a dropped
- * delivery counts as a failed one, so a subscriber whose inbox is persistently unreachable still
- * deactivates.
+ * Deliveries waiting for a host and deliveries queued for a worker together count against
+ * {@code lws.webhook.queue-capacity}; work beyond it is dropped and logged rather than queued
+ * indefinitely. A dropped delivery counts as a failed one, so a subscriber whose inbox is
+ * persistently unreachable still deactivates.
  *
  * <p>Retries are classified rather than blind: see {@link DeliveryOutcome}.
  *
@@ -60,7 +67,13 @@ public final class WebhookDispatcher implements AutoCloseable {
     private final HttpClient http;
     private final ThreadPoolExecutor deliveries;
     private final ScheduledExecutorService retries;
-    private final ConcurrentMap<String, AtomicInteger> inFlight = new ConcurrentHashMap<>();
+    /** Guards {@link #inFlight}, {@link #waiting} and {@link #waitingTotal}. */
+    private final Object slots = new Object();
+    /** Deliveries running, or queued for a worker, per inbox host. */
+    private final Map<String, Integer> inFlight = new HashMap<>();
+    /** Deliveries waiting for one of their host's slots, oldest first. */
+    private final Map<String, Deque<Pending>> waiting = new HashMap<>();
+    private int waitingTotal;
 
     public WebhookDispatcher(WebhookKeys keys, SubscriptionService subscriptions, LwsConfiguration config) {
         this(keys, subscriptions, config, OutboundFetchPolicy.forDelivery(config));
@@ -110,15 +123,41 @@ public final class WebhookDispatcher implements AutoCloseable {
     private record Delivery(String inbox, byte[] body, String contentType, String label, String subscriptionId) {
     }
 
+    /** A delivery waiting for a slot at its host, and the attempt it will be. */
+    private record Pending(Delivery delivery, int attempt) {
+    }
+
     private void submit(Delivery delivery, int attempt) {
         String host = hostOf(delivery.inbox());
-        if (!reserve(host)) {
-            log.warn("Dropping delivery to {}: already {} in flight to {} "
-                            + "(lws.webhook.max-in-flight-per-host)",
-                    delivery.label(), config.webhookMaxInFlightPerHost(), host);
+        boolean full = false;
+        synchronized (slots) {
+            if (inFlight.getOrDefault(host, 0) >= config.webhookMaxInFlightPerHost()) {
+                // The host is at its cap: wait in its line rather than be dropped, within the
+                // overall capacity.
+                if (waitingTotal + deliveries.getQueue().size() >= config.webhookQueueCapacity()) {
+                    full = true;
+                } else {
+                    waiting.computeIfAbsent(host, h -> new ArrayDeque<>()).addLast(new Pending(delivery, attempt));
+                    waitingTotal++;
+                    log.debug("Holding delivery to {}: {} already in flight to {}",
+                            delivery.label(), config.webhookMaxInFlightPerHost(), host);
+                    return;
+                }
+            } else {
+                inFlight.merge(host, 1, Integer::sum);
+            }
+        }
+        if (full) {
+            log.warn("Dropping delivery to {}: {} deliveries are already waiting (lws.webhook.queue-capacity)",
+                    delivery.label(), config.webhookQueueCapacity());
             finish(delivery, DeliveryOutcome.RETRY);
             return;
         }
+        dispatch(host, delivery, attempt);
+    }
+
+    /** Hands a delivery that holds one of its host's slots to a worker. */
+    private void dispatch(String host, Delivery delivery, int attempt) {
         try {
             deliveries.execute(() -> {
                 try {
@@ -229,25 +268,40 @@ public final class WebhookDispatcher implements AutoCloseable {
         subscriptions.recordDelivery(delivery.subscriptionId(), outcome.isSuccess());
     }
 
-    private boolean reserve(String host) {
-        AtomicInteger count = inFlight.computeIfAbsent(host, h -> new AtomicInteger());
-        int max = config.webhookMaxInFlightPerHost();
-        while (true) {
-            int current = count.get();
-            if (current >= max) {
-                return false;
+    /**
+     * A delivery to {@code host} is done with its slot: the next one waiting for the host takes it
+     * over, or, if none is, the slot is freed. Both under one lock, so a delivery cannot be left
+     * waiting for a slot that was freed while it was being parked.
+     */
+    private void release(String host) {
+        Pending next;
+        synchronized (slots) {
+            Deque<Pending> line = waiting.get(host);
+            next = line == null ? null : line.pollFirst();
+            if (next != null) {
+                waitingTotal--;
+                if (line.isEmpty()) {
+                    waiting.remove(host);
+                }
+            } else {
+                int left = inFlight.getOrDefault(host, 1) - 1;
+                if (left <= 0) {
+                    // Drop the entry so the map does not grow one per host ever delivered to.
+                    inFlight.remove(host);
+                } else {
+                    inFlight.put(host, left);
+                }
             }
-            if (count.compareAndSet(current, current + 1)) {
-                return true;
-            }
+        }
+        if (next != null) {
+            dispatch(host, next.delivery(), next.attempt());
         }
     }
 
-    private void release(String host) {
-        AtomicInteger count = inFlight.get(host);
-        if (count != null && count.decrementAndGet() <= 0) {
-            // Drop the counter so the map does not grow one entry per host ever delivered to.
-            inFlight.remove(host, count);
+    /** Deliveries waiting for a slot at their host, for tests and diagnostics. */
+    int waitingCount() {
+        synchronized (slots) {
+            return waitingTotal;
         }
     }
 
