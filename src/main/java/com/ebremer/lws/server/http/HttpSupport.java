@@ -512,6 +512,44 @@ public final class HttpSupport {
     }
 
     /**
+     * RFC 9110 &sect;13.2.2 steps 1 and 2 for a request about an existing resource: true (=> 412)
+     * when an {@code If-Match} names none of its states, or, with no {@code If-Match}, when an
+     * {@code If-Unmodified-Since} date is earlier than its last modification. "Servers SHOULD support
+     * conditional requests as defined in [RFC9110] ... including ... date-based validators"
+     * (lws10-core); {@code If-Unmodified-Since} was never consulted, so a client guarding a read or a
+     * write with a date was ignored (Touchstone conditional-get-if-unmodified-since-412).
+     *
+     * <p>Steps 3 and 4 ({@code If-None-Match}, {@code If-Modified-Since}) stay with the callers,
+     * since their outcome is a 304 for a read and a 412 for a write.
+     */
+    public static boolean preconditionFailed(HttpServletRequest request, LwsResource meta) {
+        IfMatch ifMatch = IfMatch.of(request.getHeader("If-Match"));
+        if (ifMatch.isPresent()) {
+            return !ifMatch.satisfiedBy(meta);
+        }
+        return modifiedSince(request, meta.modified());
+    }
+
+    /**
+     * True when the request carries an {@code If-Unmodified-Since} and the entity changed after it
+     * (RFC 9110 &sect;13.1.4). The condition is ignored, as RFC 9110 requires, alongside an
+     * {@code If-Match}, when the date does not parse, and when the entity has no modification time.
+     * Compared at the one-second resolution of an HTTP date, as {@link #notModifiedSince} is.
+     */
+    public static boolean modifiedSince(HttpServletRequest request, Instant modified) {
+        String header = request.getHeader("If-Unmodified-Since");
+        if (modified == null || header == null || request.getHeader("If-Match") != null) {
+            return false;
+        }
+        try {
+            Instant since = ZonedDateTime.parse(header.trim(), HTTP_DATE_LENIENT).toInstant();
+            return modified.truncatedTo(ChronoUnit.SECONDS).isAfter(since);
+        } catch (DateTimeParseException e) {
+            return false;
+        }
+    }
+
+    /**
      * The request's {@code If-Match} precondition, to be carried into the write transaction that
      * honours it. The comparison itself lives in {@link IfMatch} so that the early check here and
      * the authoritative compare-and-swap inside the transaction cannot disagree about which tags

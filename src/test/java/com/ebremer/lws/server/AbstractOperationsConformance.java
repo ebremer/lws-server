@@ -112,6 +112,60 @@ abstract class AbstractOperationsConformance {
     }
 
     @Test
+    void ifUnmodifiedSinceGuardsReadsAndWrites() throws Exception {
+        // RFC 9110 13.1.4, step 2 of 13.2.2: modified after the date -> 412; unmodified -> proceed.
+        assertEquals(201, send("PUT", "/ius", "<#it> <http://schema.org/name> \"x\" .",
+                "Content-Type", "text/turtle").statusCode());
+        String lastModified = send("GET", "/ius", null).headers().firstValue("Last-Modified").orElseThrow();
+        String epoch = "Thu, 01 Jan 1970 00:00:00 GMT";
+
+        assertEquals(200, send("GET", "/ius", null, "If-Unmodified-Since", lastModified).statusCode());
+        assertEquals(412, send("GET", "/ius", null, "If-Unmodified-Since", epoch).statusCode());
+        assertEquals(412, send("HEAD", "/ius", null, "If-Unmodified-Since", epoch).statusCode());
+        // An unparseable date is ignored, and so is the date alongside an If-Match (step 1 decides).
+        assertEquals(200, send("GET", "/ius", null, "If-Unmodified-Since", "yesterday").statusCode());
+        assertEquals(200, send("GET", "/ius", null, "If-Unmodified-Since", epoch,
+                "If-Match", etagOf("/ius")).statusCode());
+        // A GET with an If-Match naming no state of the resource fails step 1.
+        assertEquals(412, send("GET", "/ius", null, "If-Match", "\"not-a-state\"").statusCode());
+
+        // Containers, the JSON listing included.
+        assertEquals(201, send("PUT", "/iusc/", null, "Link", "<https://www.w3.org/ns/lws#Container>; rel=\"type\"")
+                .statusCode());
+        assertEquals(412, send("GET", "/iusc/", null, "If-Unmodified-Since", epoch).statusCode());
+
+        // Writes: a stale date refuses the write and changes nothing.
+        assertEquals(412, send("DELETE", "/ius", null, "If-Unmodified-Since", epoch).statusCode());
+        assertEquals(200, send("GET", "/ius", null).statusCode(), "the refused DELETE removed nothing");
+        // Alongside a matching If-Match the date is ignored, so the write proceeds.
+        assertEquals(204, send("PATCH", "/ius", "INSERT DATA { <http://ex/s> <http://schema.org/x> \"y\" }",
+                "Content-Type", "application/sparql-update", "If-Match", etagOf("/ius"),
+                "If-Unmodified-Since", epoch).statusCode());
+        lastModified = send("GET", "/ius", null).headers().firstValue("Last-Modified").orElseThrow();
+        assertEquals(204, send("DELETE", "/ius", null, "If-Unmodified-Since", lastModified).statusCode());
+    }
+
+    @Test
+    void linkHeadersOnPostBecomeInitialMetadata() throws Exception {
+        // lws10-core 9.2: "Clients MAY provide initial user-managed metadata for the new resource by
+        // including one or more Link headers in the POST request"; server-managed ones are refused.
+        assertEquals(201, send("PUT", "/lhp/", null, "Link", "<https://www.w3.org/ns/lws#Container>; rel=\"type\"")
+                .statusCode());
+        HttpResponse<String> created = send("POST", "/lhp/", "body", "Content-Type", "text/plain",
+                "Link", "<https://shapes.example/S>; rel=\"describedby\"",
+                "Link", "<https://elsewhere.example/acl>; rel=\"acl\"",
+                "Link", "<https://elsewhere.example/>; rel=\"up\"");
+        assertEquals(201, created.statusCode());
+        String location = created.headers().firstValue("Location").orElseThrow();
+        String meta = location.substring(baseUrl.length()) + ".meta";
+        JsonObject m = parse(send("GET", meta, null).body()).getJsonArray("linkset").getJsonObject(0);
+        assertEquals("https://shapes.example/S", m.getJsonArray("describedby").getJsonObject(0).getString("href"));
+        assertFalse(m.containsKey("acl"), "the acl link is the server's");
+        assertTrue(!m.containsKey("up") || !m.toString().contains("elsewhere.example"),
+                "up is server-managed and cannot be overridden");
+    }
+
+    @Test
     void containerRepresentationIsLwsJsonAndNegotiable() throws Exception {
         assertEquals(201, send("PUT", "/cnt/", null, "Link", "<https://www.w3.org/ns/lws#Container>; rel=\"type\"")
                 .statusCode());

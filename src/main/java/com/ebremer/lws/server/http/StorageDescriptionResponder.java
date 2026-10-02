@@ -55,6 +55,12 @@ public final class StorageDescriptionResponder {
         HttpSupport.vary(resp, "Accept");
         HttpSupport.addStorageLink(resp, config);
 
+        // RFC 9110 13.1.4: a date validator the description fails. Answered here, not thrown: this
+        // responder also serves the standalone description servlet, which maps no LwsException.
+        if (HttpSupport.modifiedSince(req, lastModified)) {
+            resp.setStatus(HttpServletResponse.SC_PRECONDITION_FAILED);
+            return;
+        }
         if (HttpSupport.ifNoneMatchMatches(req, etag) || HttpSupport.notModifiedSince(req, lastModified)) {
             resp.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
             return;

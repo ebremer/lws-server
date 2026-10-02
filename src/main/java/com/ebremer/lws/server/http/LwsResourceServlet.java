@@ -159,6 +159,9 @@ public final class LwsResourceServlet extends HttpServlet {
             addAclLink(resp, meta.iri());
             resp.setHeader("Accept-Patch", HttpSupport.ACCEPT_PATCH);
             HttpSupport.vary(resp, "Accept");
+            if (HttpSupport.preconditionFailed(req, meta)) {
+                throw LwsException.preconditionFailed("Precondition Failed");
+            }
             if (HttpSupport.ifNoneMatchMatches(req, representation)
                     || HttpSupport.ifModifiedSinceNotModified(req, representation)) {
                 resp.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
@@ -172,6 +175,9 @@ public final class LwsResourceServlet extends HttpServlet {
         HttpSupport.setResourceHeaders(resp, meta, config);
         addDeclaredTypeLinks(resp, meta.iri());
         addAclLink(resp, meta.iri());
+        if (HttpSupport.preconditionFailed(req, meta)) {
+            throw LwsException.preconditionFailed("Precondition Failed");
+        }
         if (HttpSupport.ifNoneMatchMatches(req, meta) || HttpSupport.ifModifiedSinceNotModified(req, meta)) {
             resp.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
             return;
@@ -205,6 +211,9 @@ public final class LwsResourceServlet extends HttpServlet {
             RdfFormats.Entry fmt = RdfFormats.negotiate(accept);
             LwsResource representation = meta.withEtag(Etags.qualify(meta.etag(), fmt.variantToken()));
             HttpSupport.setResourceHeaders(resp, representation, config);
+            if (HttpSupport.preconditionFailed(req, meta)) {
+                throw LwsException.preconditionFailed("Precondition Failed");
+            }
             if (HttpSupport.ifNoneMatchMatches(req, representation)
                     || HttpSupport.ifModifiedSinceNotModified(req, representation)) {
                 resp.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
@@ -237,6 +246,9 @@ public final class LwsResourceServlet extends HttpServlet {
         HttpSupport.setResourceHeaders(resp, pageMeta, config);
         if (paginated) {
             addContainerPageLinks(resp, meta.iri(), page, pages);
+        }
+        if (HttpSupport.preconditionFailed(req, meta)) {
+            throw LwsException.preconditionFailed("Precondition Failed");
         }
         if (HttpSupport.ifNoneMatchMatches(req, pageMeta) || HttpSupport.ifModifiedSinceNotModified(req, pageMeta)) {
             resp.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
@@ -504,7 +516,7 @@ public final class LwsResourceServlet extends HttpServlet {
         LwsResource created = service.create(path, principal, wr);
         // A POST can declare the new resource's types too — the server chose its name, so this is
         // the first chance the client has to say what it is.
-        applyDeclaredTypes(req, Iris.toPath(config.baseUri(), created.iri()));
+        applyCreateLinks(req, Iris.toPath(config.baseUri(), created.iri()));
         HttpSupport.setResourceHeaders(resp, created, config);
         addAclLink(resp, created.iri());
         resp.setHeader("Location", created.iri());
@@ -518,6 +530,7 @@ public final class LwsResourceServlet extends HttpServlet {
         IfNoneMatch ifNoneMatch = HttpSupport.ifNoneMatch(req);
         requireWriteBeforeBody(req, path, principal, false);
         requirePutPrecondition(req, path, principal, ifMatch, ifNoneMatch);
+        checkIfUnmodifiedSince(req, path, principal);
         WriteRequest wr = new WriteRequest(req.getContentType(), readVerifiedBody(req),
                 HttpSupport.parseTypeHint(req), null);
         PutOutcome out = service.put(path, principal, wr, ifMatch, ifNoneMatch);
@@ -538,6 +551,7 @@ public final class LwsResourceServlet extends HttpServlet {
         IfMatch ifMatch = HttpSupport.ifMatch(req);
         requireWriteBeforeBody(req, path, principal, false);
         checkIfMatch(path, principal, ifMatch);
+        checkIfUnmodifiedSince(req, path, principal);
         LwsResource updated = service.patch(path, principal, readVerifiedBody(req), req.getContentType(),
                 ifMatch);
         HttpSupport.setResourceHeaders(resp, updated, config);
@@ -576,16 +590,45 @@ public final class LwsResourceServlet extends HttpServlet {
     }
 
     /**
-     * Record any {@code Link: rel="type"} the client sent as a declared type of the resource
-     * (lws10-searchindex, which makes this the preferred way to say what a resource is).
+     * Record the Link headers a client sent with a POST as the new resource's user-managed metadata:
+     * "Clients MAY provide initial user-managed metadata for the new resource by including one or
+     * more Link headers in the POST request" (lws10-core 9.2).
+     *
+     * <p>Only {@code rel="type"} used to be kept, so a {@code describedby} sent as a header on create
+     * was dropped while the same link PATCHed into the linkset was kept and indexed, although
+     * lws10-index requires every relation source to be "treated identically" (Touchstone
+     * type-search-relation-from-link-header).
+     *
+     * <p>A PUT or PATCH is different: it modifies content only, and folds metadata in only with
+     * {@code Prefer: set-linkset} (lws10-core 9.3), so it keeps to {@link #applyDeclaredTypes}.
+     * What a client may write is bounded twice. {@code LinksetService} drops the server-managed
+     * relations ({@code up}, {@code linkset}, the storage link) and refuses LWS-namespace and LDP
+     * types, so a client can describe its resource but cannot claim to be a container. And this
+     * drops the relations the server itself emits on the resource ({@code acl} and the paging links),
+     * which a client's copy would contradict.
+     */
+    private void applyCreateLinks(HttpServletRequest req, String path) {
+        Map<String, List<String>> links = new java.util.LinkedHashMap<>(HttpSupport.parseLinks(req));
+        links.keySet().removeAll(SERVER_EMITTED_RELATIONS);
+        links.values().removeIf(List::isEmpty);
+        if (!links.isEmpty()) {
+            linksets.mergeFromLinks(path, links);
+        }
+    }
+
+    /** Relations this servlet writes on a resource's own responses; a client's header cannot set them. */
+    private static final Set<String> SERVER_EMITTED_RELATIONS = Set.of("acl", "first", "prev", "next", "last");
+
+    /**
+     * Record any {@code Link: rel="type"} the client sent with a PUT or PATCH as a declared type of
+     * the resource (lws10-index, which makes this the preferred way to say what a resource is).
      *
      * <p>Not gated on {@code Prefer: set-linkset}. That preference is how a client replaces or merges
      * its <em>whole</em> metadata document from headers, and demanding it here would mean a
      * conformant {@code Link: rel="type"} was ignored unless the client also asked for something
-     * else. Only the type relation is applied, and only the IRIs {@code LinksetService} accepts —
-     * the LWS namespace and the LDP interaction models are refused, so a client can describe its
-     * resource and cannot claim to be a container. When the preference <em>is</em> set, the general
-     * path above already carries the types and this does not run a second write.
+     * else. Only the type relation is applied, and only the IRIs {@code LinksetService} accepts.
+     * When the preference <em>is</em> set, the general path above already carries the types and
+     * this does not run a second write.
      */
     private void applyDeclaredTypes(HttpServletRequest req, String path) {
         List<String> declared = HttpSupport.parseLinks(req).get("type");
@@ -640,6 +683,7 @@ public final class LwsResourceServlet extends HttpServlet {
             LwsPrincipal principal) {
         String depth = req.getHeader("Depth");
         boolean recursive = depth != null && depth.trim().equalsIgnoreCase("infinity");
+        checkIfUnmodifiedSince(req, path, principal);
         service.delete(path, principal, recursive, HttpSupport.ifMatch(req));
         resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
     }
@@ -665,6 +709,27 @@ public final class LwsResourceServlet extends HttpServlet {
         }
         service.stat(path).ifPresent(meta -> {
             if (!ifMatch.satisfiedBy(meta)) {
+                throw LwsException.preconditionFailed("Precondition Failed");
+            }
+        });
+    }
+
+    /**
+     * Refuse a write to a resource modified after the request's {@code If-Unmodified-Since}
+     * (RFC 9110 &sect;13.1.4; ignored alongside an {@code If-Match}).
+     *
+     * <p>Advisory in the same way {@link #checkIfMatch} is: the date is read in a transaction of its
+     * own. A date validator has one-second resolution and cannot close the race an entity-tag closes
+     * inside the write transaction, which is why RFC 9110 prefers {@code If-Match} where both are
+     * available; this honours the weaker guard a client chose to send. Behind
+     * {@link #mayLearnTheTag}, so the answer reveals nothing a caller may not read.
+     */
+    private void checkIfUnmodifiedSince(HttpServletRequest req, String path, LwsPrincipal principal) {
+        if (req.getHeader("If-Unmodified-Since") == null || !mayLearnTheTag(path, principal)) {
+            return;
+        }
+        service.stat(path).ifPresent(meta -> {
+            if (HttpSupport.modifiedSince(req, meta.modified())) {
                 throw LwsException.preconditionFailed("Precondition Failed");
             }
         });
