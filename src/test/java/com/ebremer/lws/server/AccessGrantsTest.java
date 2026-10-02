@@ -332,6 +332,20 @@ class AccessGrantsTest {
                 grantJson("[\"read\"]", bobDid, baseUrl + "/doc1"), "application/lws+json").statusCode());
     }
 
+    /**
+     * type is REQUIRED on an access grant (lws10-core 11.2): a grant without one is refused, as one
+     * with the wrong type is, rather than having it filled in (Touchstone
+     * access-grant-incomplete-refused).
+     */
+    @Test
+    void aGrantWithoutItsTypeIsRefused() throws Exception {
+        String untyped = grantJson("[\"read\"]", bobDid, baseUrl + "/doc1")
+                .replace("\"type\":[\"AccessGrant\"], ", "");
+        assertEquals(400, owner("POST", "/.lws/access-grants", untyped, "application/lws+json").statusCode());
+        assertEquals(201, owner("POST", "/.lws/access-grants",
+                grantJson("[\"read\"]", bobDid, baseUrl + "/doc1"), "application/lws+json").statusCode());
+    }
+
     @Test
     void wrongMediaTypeIsRejected() throws Exception {
         assertEquals(415, owner("POST", "/.lws/access-grants",

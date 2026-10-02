@@ -795,8 +795,10 @@ public final class AccessService {
 
     private JsonObject normalize(JsonObject doc, Kind kind, String id) {
         String term = kind == Kind.REQUEST ? "AccessRequest" : "AccessGrant";
-        if (doc.containsKey("type") && !typeIncludes(doc, term)) {
-            throw LwsException.badRequest("type must include \"" + term + "\"");
+        // REQUIRED (lws10-core 11.2): a document without its type is refused, as one with the
+        // wrong type is, rather than having the type filled in for it.
+        if (!doc.containsKey("type") || !typeIncludes(doc, term)) {
+            throw LwsException.badRequest("\"type\" is required and must include \"" + term + "\"");
         }
         String storage = string(doc, "storage");
         if (storage == null || !isAbsoluteUri(storage)) {
