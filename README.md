@@ -371,7 +371,7 @@ restart, and the credential authenticates you as that owner.
 | `GET`/`HEAD` | container | `application/lws+json` listing (`id`/`type`/`totalItems`/`items[]` with `id`/`type`/`format`/`size`/`modified`, `type` naming any declared types after `DataResource`/`Container`); content-negotiable as `application/ld+json`/`application/json` (the requested `Content-Type` is echoed) or RDF; paginated (`?page=N`, `Link` rel=`first`/`prev`/`next`/`last`) above `lws.container.page-size` |
 | `POST` | a container | Create a contained resource; `Slug` names it, `Link: rel="type"` picks container/RDF/non-RDF; `201` + `Location`. A reserved name is refused with `409` — see [Reserved names](#reserved-names) |
 | `PUT` | any IRI | Create (new) or replace (existing) at that exact IRI; replacing MUST be conditional. A reserved path is refused with `409`; an existing container with `409` (its representation is its membership); a `Link: rel="type"` that contradicts the IRI's own shape with `400` |
-| `PATCH` | RDF or JSON resource | RDF: `application/sparql-update`; JSON & linkset: `application/merge-patch+json` (RFC 7386) or `application/json-patch+json` (RFC 6902) |
+| `PATCH` | RDF or JSON resource | RDF: `application/sparql-update`; JSON & linkset: `application/json-patch+json` (RFC 6902, the format lws10-core requires) or `application/merge-patch+json` (RFC 7396) |
 | `DELETE` | any resource | Delete (non-empty container → `409`, or recursive with `Depth: infinity`); removes the resource's metadata too |
 | `GET`/`HEAD`/`PATCH`/`PUT`/`OPTIONS` | `<resource>.meta` | The resource's linkset (metadata) resource — see [Metadata](#metadata-linkset) |
 | `OPTIONS` | any | `Allow`, `Accept-Post`, `Accept-Patch`, `Want-Content-Digest` |
@@ -485,8 +485,8 @@ Every resource has a **linkset resource** at `<resource>.meta`
 ([RFC 9264](https://www.rfc-editor.org/rfc/rfc9264), `application/linkset+json`), discoverable via
 the `rel="linkset"` Link header. It merges server-managed links (`type`, `up`, `linkset`, the
 storage description) with user-managed links. Server-managed links cannot be overridden. The
-user-managed portion is updated with `application/merge-patch+json` or `application/json-patch+json`
-(or replaced with PUT); these writes are conditional — a missing `If-Match` is refused with `428`, a
+user-managed portion is updated with `application/json-patch+json` (addressing the document a `GET`
+returns, e.g. `/linkset/0/license`) or `application/merge-patch+json` (or replaced with PUT); these writes are conditional — a missing `If-Match` is refused with `428`, a
 stale one with `412`. A relation's value may be an RFC 9264 target array (`{"href": …}` objects, with
 optional link attributes such as `title`) **or a literal** (a JSON string/array, e.g. a `title` or
 `creator` label) — both round-trip, so literal-valued core metadata is supported.

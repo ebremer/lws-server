@@ -46,7 +46,7 @@ fine-grained access rules) decide who may do what.
 | Resource & containment model | LWS Core, LDP / Solid conventions |
 | Storage description | [Controlled Identifiers 1.0](https://www.w3.org/TR/cid-1.0/) (`application/lws+cid`) |
 | RDF metadata + linkset | RDF 1.1, [RFC 9264](https://www.rfc-editor.org/rfc/rfc9264) Linksets |
-| Patch formats | [RFC 7386](https://www.rfc-editor.org/rfc/rfc7386) Merge Patch, [RFC 6902](https://www.rfc-editor.org/rfc/rfc6902) JSON Patch, SPARQL 1.1 Update |
+| Patch formats | [RFC 6902](https://www.rfc-editor.org/rfc/rfc6902) JSON Patch, [RFC 7396](https://www.rfc-editor.org/rfc/rfc7396) Merge Patch, SPARQL 1.1 Update |
 | Conditional / range requests | RFC 9110, [RFC 7233](https://www.rfc-editor.org/rfc/rfc7233) |
 | Search | the HTTP `QUERY` method with `application/lws-query+json` |
 | Errors | [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) problem+json |

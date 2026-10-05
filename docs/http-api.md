@@ -18,7 +18,7 @@ nav_order: 5
 | `GET` / `HEAD` | container | `application/lws+json` listing (`id`/`type`/`totalItems`/`items[]`, each with `id`/`type`/`format`/`size`/`modified`, `type` naming any declared types after `DataResource`/`Container`); content-negotiable as `application/ld+json` / `application/json` (the requested `Content-Type` is echoed) or RDF; paginated (`?page=N`, `Link` rel `first`/`prev`/`next`/`last`) above `lws.container.page-size`. |
 | `POST` | a container | Create a contained resource; `Slug` names it, `Link: rel="type"` picks container/RDF/non-RDF; `201` + `Location`. A [reserved name](#reserved-names) is refused with `409`. |
 | `PUT` | any IRI | Create (new) or replace (existing) at that exact IRI; replacing MUST be conditional. The parent container must already exist (`404` otherwise; `409` if the parent is not a container). A reserved path is refused with `409`; an existing container with `409` (its representation is its membership); a `Link: rel="type"` that contradicts the IRI's own shape with `400`. |
-| `PATCH` | RDF or JSON resource | RDF: `application/sparql-update` only (JSON Merge Patch is not defined over RDF and is not accepted there); JSON & linkset: `application/merge-patch+json` (RFC 7386) or `application/json-patch+json` (RFC 6902). See [Metadata & Linksets](metadata-linksets.md). |
+| `PATCH` | RDF or JSON resource | RDF: `application/sparql-update` only (JSON Merge Patch is not defined over RDF and is not accepted there); JSON & linkset: `application/json-patch+json` (RFC 6902, the format lws10-core requires) or `application/merge-patch+json` (RFC 7396). See [Metadata & Linksets](metadata-linksets.md). |
 | `DELETE` | any resource | Delete (non-empty container → `409`, or recursive with `Depth: infinity`); removes the resource's metadata too. |
 | `GET`/`HEAD`/`PATCH`/`PUT`/`OPTIONS` | `<resource>.meta` | The resource's linkset (metadata) resource — see [Metadata & Linksets](metadata-linksets.md). |
 | `OPTIONS` | any | `Allow`, `Accept-Post`, `Accept-Patch`, `Want-Content-Digest`. |
@@ -147,7 +147,7 @@ the storage URI.
     { "type": "https://w3c.github.io/lws-protocol/lws10-index/" },
     { "type": "https://www.w3.org/ns/lws#PatchSupport",
       "format": { "text/turtle": ["application/sparql-update"],
-                  "application/json": ["application/merge-patch+json", "application/json-patch+json"] } },
+                  "application/json": ["application/json-patch+json", "application/merge-patch+json"] } },
     { "type": "https://www.w3.org/ns/lws#ContentNegotiation",
       "source": "text/turtle", "target": ["application/ld+json", "application/n-triples", "application/rdf+xml", "application/trig"] },
     { "type": "https://www.rfc-editor.org/info/rfc9530", "algorithm": ["sha-256", "sha-512"] }

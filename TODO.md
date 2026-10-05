@@ -58,10 +58,14 @@ changed upstream since the previous baseline, and the deliberate divergences; th
   `mvn -o clean test` → **569 tests, 0 failures**. COMPLIANCE.md's "Re-review of 28 September 2026"
   has the account, and the open PRs that would change server behaviour (#255 JSON Patch baseline,
   #253, #241, #237, #162).
-- [ ] **D-15 · Next re-check.** `git fetch` in `w3c/lws-protocol`, then
-  `git diff --stat 9b03b32 origin/main` and `gh pr list --repo w3c/lws-protocol --state merged`.
-  Watch #255 in particular: if it merges, JSON Patch becomes the MUST, and advertising it first in
-  the storage description is the only change. Also re-check `lws-contrib/lws-test-suite`, which
+- [x] **D-15 · Re-check against the drafts of 5 October 2026** (`ef02548`, published as
+  `WD-lws10-core-20261005`). One normative change, #255: JSON Patch is the required patch format.
+  A linkset JSON Patch was applied to the stored relation map, so a patch of the `GET` document
+  answered `409` (Touchstone run `4d7187f2`); it now applies to the document, and JSON Patch is
+  advertised first. COMPLIANCE.md's "Re-review of 5 October 2026" has the account.
+- [ ] **D-16 · Next re-check.** `git fetch` in `w3c/lws-protocol`, then
+  `git diff --stat ef02548 origin/main` and `gh pr list --repo w3c/lws-protocol --state merged`.
+  Also re-check `lws-contrib/lws-test-suite`, which
   cannot be run against a server that follows the Working Draft as long as it is at `b8cb134`.
 
 ---
