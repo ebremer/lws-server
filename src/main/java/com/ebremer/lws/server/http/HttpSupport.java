@@ -63,9 +63,9 @@ public final class HttpSupport {
     /** The JWS algorithms this server verifies, as a DPoP challenge's {@code algs} (RFC 9449 §7.1). */
     public static final String DPOP_ALGS = "ES256 ES384 ES512 EdDSA RS256 RS384 RS512 PS256 PS384 PS512";
 
-    /** JSON Merge Patch (RFC 7386). */
+    /** JSON Merge Patch (RFC 7396, which obsoletes RFC 7386): accepted, no longer required. */
     public static final String MERGE_PATCH = "application/merge-patch+json";
-    /** JSON Patch (RFC 6902). */
+    /** JSON Patch (RFC 6902): the patch format lws10-core requires since w3c/lws-protocol#255. */
     public static final String JSON_PATCH = "application/json-patch+json";
     /**
      * What an RDF resource accepts on PATCH. Merge patch is deliberately absent: it is not defined
@@ -74,8 +74,8 @@ public final class HttpSupport {
      * the opaque JSON resources where they do have a meaning.
      */
     public static final String ACCEPT_PATCH = "application/sparql-update";
-    /** {@code Accept-Patch} for JSON resources and linksets: JSON Merge Patch or JSON Patch. */
-    public static final String ACCEPT_PATCH_JSON = MERGE_PATCH + ", " + JSON_PATCH;
+    /** {@code Accept-Patch} for JSON resources and linksets: JSON Patch, the required one, first. */
+    public static final String ACCEPT_PATCH_JSON = JSON_PATCH + ", " + MERGE_PATCH;
 
     /** Media type of LWS container representations and the other LWS JSON-LD documents. */
     public static final String LWS_JSON = "application/lws+json";

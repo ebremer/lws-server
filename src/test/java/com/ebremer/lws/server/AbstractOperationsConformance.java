@@ -519,6 +519,63 @@ abstract class AbstractOperationsConformance {
                 after.getJsonArray("describedby").getJsonObject(0).getString("href"));
     }
 
+    /**
+     * JSON Patch, the format a linkset MUST take (w3c/lws-protocol#255), addresses the document a GET
+     * returns: {@code /linkset/0} is the resource's own link context object. These are the requests
+     * Touchstone's linkset-patch-json-patch, linkset-up-not-redirected and linkset-patch-stays-linkset
+     * send.
+     */
+    @Test
+    void linksetJsonPatchAddressesTheDocumentAGetReturns() throws Exception {
+        assertEquals(201, send("PUT", "/ljd", "<#it> <http://schema.org/name> \"x\" .",
+                "Content-Type", "text/turtle").statusCode());
+        HttpResponse<String> meta = send("GET", "/ljd.meta", null);
+        assertTrue(meta.headers().firstValue("Accept-Patch").orElse("").startsWith("application/json-patch+json"),
+                "JSON Patch is advertised first: " + meta.headers().firstValue("Accept-Patch"));
+        JsonObject before = parse(meta.body()).getJsonArray("linkset").getJsonObject(0);
+
+        assertEquals(204, send("PATCH", "/ljd.meta",
+                "[{\"op\":\"add\",\"path\":\"/linkset/0/license\","
+                        + "\"value\":[{\"href\":\"https://creativecommons.org/licenses/by/4.0/\"}]}]",
+                "Content-Type", "application/json-patch+json",
+                "If-Match", meta.headers().firstValue("ETag").orElseThrow()).statusCode());
+        JsonObject after = parse(send("GET", "/ljd.meta", null).body()).getJsonArray("linkset").getJsonObject(0);
+        assertEquals("https://creativecommons.org/licenses/by/4.0/",
+                after.getJsonArray("license").getJsonObject(0).getString("href"));
+        assertEquals(before.get("up"), after.get("up"), "server-managed links are untouched");
+        assertEquals(before.get("type"), after.get("type"), "server-managed links are untouched");
+
+        // A forged parent is ignored, as a server-managed relation is everywhere: rel="up" is unchanged.
+        String tag = send("GET", "/ljd.meta", null).headers().firstValue("ETag").orElseThrow();
+        int forged = send("PATCH", "/ljd.meta",
+                "[{\"op\":\"add\",\"path\":\"/linkset/0/up\","
+                        + "\"value\":[{\"href\":\"https://linkset.invalid/forged-parent/\"}]}]",
+                "Content-Type", "application/json-patch+json", "If-Match", tag).statusCode();
+        assertTrue(forged == 204 || forged / 100 == 4, "status " + forged);
+        assertEquals(before.get("up"), parse(send("GET", "/ljd.meta", null).body())
+                .getJsonArray("linkset").getJsonObject(0).get("up"));
+
+        // A patch that would leave something that is not a linkset document is refused.
+        tag = send("GET", "/ljd.meta", null).headers().firstValue("ETag").orElseThrow();
+        assertEquals(422, send("PATCH", "/ljd.meta",
+                "[{\"op\":\"replace\",\"path\":\"/linkset\",\"value\":\"not a linkset\"}]",
+                "Content-Type", "application/json-patch+json", "If-Match", tag).statusCode());
+
+        // All or nothing: a failed test after an add is a 409, and the linkset keeps its tag.
+        assertEquals(409, send("PATCH", "/ljd.meta",
+                "[{\"op\":\"add\",\"path\":\"/linkset/0/author\",\"value\":[{\"href\":\"https://example.org/a\"}]},"
+                        + "{\"op\":\"test\",\"path\":\"/linkset/0/anchor\",\"value\":\"https://example.org/other\"}]",
+                "Content-Type", "application/json-patch+json", "If-Match", tag).statusCode());
+        assertEquals(tag, send("GET", "/ljd.meta", null).headers().firstValue("ETag").orElseThrow());
+
+        // And remove takes the license away again.
+        assertEquals(204, send("PATCH", "/ljd.meta",
+                "[{\"op\":\"remove\",\"path\":\"/linkset/0/license\"}]",
+                "Content-Type", "application/json-patch+json", "If-Match", tag).statusCode());
+        assertFalse(parse(send("GET", "/ljd.meta", null).body()).getJsonArray("linkset").getJsonObject(0)
+                .containsKey("license"));
+    }
+
     @Test
     void preferSetLinksetCombinedWrite() throws Exception {
         // A Link header without Prefer: set-linkset does NOT touch the linkset (off by default).

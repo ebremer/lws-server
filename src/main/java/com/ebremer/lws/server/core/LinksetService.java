@@ -41,7 +41,8 @@ import org.slf4j.LoggerFactory;
  * such as {@code title}) or a <strong>literal</strong> (a JSON string or array, e.g. a {@code title}
  * or {@code creator} label) — both round-trip unchanged, so literal-valued core metadata is supported
  * even though RFC 9264 itself is href-based. It is updated by full replacement (PUT of a linkset
- * document), JSON Merge Patch (RFC 7386), JSON Patch (RFC 6902), or — via {@code Prefer: set-linkset}
+ * document), JSON Patch (RFC 6902, the format lws10-core requires), JSON Merge Patch (RFC 7396), or
+ * — via {@code Prefer: set-linkset}
  * on a resource write — the request's {@code Link} headers. It is removed when its resource is deleted.
  *
  * @author Erich Bremer
@@ -350,7 +351,7 @@ public final class LinksetService implements ResourceCleanup {
         return update(targetPath, ifMatch, current -> replacement);
     }
 
-    /** Apply a JSON Merge Patch (RFC 7386) to the user-managed links. */
+    /** Apply a JSON Merge Patch (RFC 7396) to the user-managed links. */
     public Linkset patch(String targetPath, byte[] body) {
         return patch(targetPath, body, IfMatch.NONE);
     }
@@ -360,7 +361,7 @@ public final class LinksetService implements ResourceCleanup {
      *
      * <p>The patch may be the relation map the links are stored as ({@code {"license": [...]}}) or
      * the RFC 9264 document a GET returns ({@code {"linkset": [{"anchor": ..., "license": [...]}]}}).
-     * A merge patch is defined over the target's own representation (RFC 7386), so a client that
+     * A merge patch is defined over the target's own representation (RFC 7396), so a client that
      * edits what it read must be understood: before, the document form merged a {@code linkset}
      * key that the sanitizer then dropped, and the request answered 204 having changed nothing.
      * In the document form each entry must describe this resource (else 422), and its relations
@@ -377,8 +378,8 @@ public final class LinksetService implements ResourceCleanup {
         }
         JsonArray document = linksetDocument(patch);
         if (document != null) {
-            return update(targetPath, ifMatch, (anchor, current) -> sanitizeUserRelations(
-                    asObject(JsonMergePatch.apply(current, relationsOf(document, anchor)))));
+            return update(targetPath, ifMatch, (meta, current) -> sanitizeUserRelations(
+                    asObject(JsonMergePatch.apply(current, relationsOf(document, meta.iri())))));
         }
         return update(targetPath, ifMatch,
                 current -> sanitizeUserRelations(asObject(JsonMergePatch.apply(current, patch))));
@@ -432,11 +433,107 @@ public final class LinksetService implements ResourceCleanup {
         return jsonPatch(targetPath, body, IfMatch.NONE);
     }
 
-    /** Apply a JSON Patch, honouring the client {@code If-Match} precondition. */
+    /**
+     * Apply a JSON Patch, honouring the client {@code If-Match} precondition.
+     *
+     * <p>JSON Patch is the format lws10-core requires on a linkset (w3c/lws-protocol#255), and like
+     * any patch it applies to the target's representation (RFC 5789 section 2): the RFC 9264
+     * document a GET returns. So {@code /linkset/0/license} names the resource's own link context
+     * object, as a client that read the linkset expects. It used to be applied to the relation map
+     * the links are stored as, where there is no {@code /linkset}, and that patch answered 409.
+     *
+     * <p>A patch whose every pointer addresses {@code /linkset} (or the whole document) is applied
+     * to the document; what it leaves must still be a linkset document for this resource, else 422,
+     * and its relations become the user-managed links, server-managed ones ignored as everywhere
+     * else. A patch that addresses the relations directly ({@code /describedby}) is still applied to
+     * the relation map, as before: the two cannot be confused, because {@code linkset} is a
+     * server-managed relation the map never holds. The merge patch accepts both forms the same way.
+     */
     public Linkset jsonPatch(String targetPath, byte[] body, IfMatch ifMatch) {
         JsonArray patch = JsonPatch.read(body);
+        if (addressesDocument(patch)) {
+            return update(targetPath, ifMatch, (meta, current) ->
+                    userRelationsOf(JsonPatch.apply(document(meta, current), patch), meta.iri()));
+        }
         return update(targetPath, ifMatch,
                 current -> sanitizeUserRelations(asObject(JsonPatch.apply(current, patch))));
+    }
+
+    /**
+     * Whether a JSON Patch addresses the linkset document rather than the relation map: every
+     * operation's {@code path}, and {@code from} where it has one, is the whole document or lies
+     * under {@code /linkset}. A malformed operation answers false, and is refused when it is applied.
+     */
+    private static boolean addressesDocument(JsonArray patch) {
+        if (patch.isEmpty()) {
+            return false;
+        }
+        for (JsonValue v : patch) {
+            if (v.getValueType() != JsonValue.ValueType.OBJECT) {
+                return false;
+            }
+            for (String member : List.of("path", "from")) {
+                JsonValue pointer = v.asJsonObject().get(member);
+                if (pointer == null && member.equals("from")) {
+                    continue;
+                }
+                if (pointer == null || pointer.getValueType() != JsonValue.ValueType.STRING) {
+                    return false;
+                }
+                String p = ((jakarta.json.JsonString) pointer).getString();
+                if (!p.isEmpty() && !p.equals("/linkset") && !p.startsWith("/linkset/")) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The user-managed relations of a whole linkset document, as a JSON Patch leaves it: an object
+     * whose sole member is {@code linkset}, an array of link context objects that each name this
+     * resource as their {@code anchor} (RFC 9264 section 4.2), else 422. A relation spread over
+     * several context objects is one relation; the sanitizer then drops the server-managed ones and
+     * keeps only the declarable types.
+     */
+    private static JsonObject userRelationsOf(JsonStructure document, String anchor) {
+        if (document.getValueType() != JsonValue.ValueType.OBJECT || document.asJsonObject().size() != 1
+                || !(document.asJsonObject().get("linkset") instanceof JsonArray contexts)) {
+            throw new LwsException(422, "A JSON Patch must leave a linkset document: an object whose "
+                    + "sole member is linkset, an array of link context objects (RFC 9264 section 4.2.1)");
+        }
+        Map<String, JsonValue> relations = new java.util.LinkedHashMap<>();
+        for (JsonValue v : contexts) {
+            if (v.getValueType() != JsonValue.ValueType.OBJECT
+                    || !(v.asJsonObject().get("anchor") instanceof jakarta.json.JsonString a)
+                    || !anchor.equals(a.getString())) {
+                throw new LwsException(422, "This linkset describes " + anchor + " only, and every link "
+                        + "context object must name it as its anchor");
+            }
+            v.asJsonObject().forEach((rel, value) -> {
+                if (!"anchor".equals(rel)) {
+                    relations.merge(rel, value, LinksetService::joined);
+                }
+            });
+        }
+        JsonObjectBuilder out = Json.createObjectBuilder();
+        relations.forEach(out::add);
+        return sanitizeUserRelations(out.build());
+    }
+
+    /** Two context objects' values for one relation: arrays joined without repeats, else the later. */
+    private static JsonValue joined(JsonValue first, JsonValue second) {
+        if (first.getValueType() != JsonValue.ValueType.ARRAY
+                || second.getValueType() != JsonValue.ValueType.ARRAY) {
+            return second;
+        }
+        JsonArrayBuilder out = Json.createArrayBuilder(first.asJsonArray());
+        for (JsonValue v : second.asJsonArray()) {
+            if (!first.asJsonArray().contains(v)) {
+                out.add(v);
+            }
+        }
+        return out.build();
     }
 
     /** Replace the user-managed links from parsed {@code Link} headers (Prefer: set-linkset on PUT). */
@@ -527,12 +624,12 @@ public final class LinksetService implements ResourceCleanup {
      * it can still fail on a bad JSON Pointer, which simply aborts the transaction.
      */
     private Linkset update(String targetPath, IfMatch ifMatch, UnaryOperator<JsonObject> mutation) {
-        return update(targetPath, ifMatch, (anchor, current) -> mutation.apply(current));
+        return update(targetPath, ifMatch, (meta, current) -> mutation.apply(current));
     }
 
-    /** {@link #update(String, IfMatch, UnaryOperator)} for a mutation that needs the resource's IRI. */
+    /** {@link #update(String, IfMatch, UnaryOperator)} for a mutation that needs the resource itself. */
     private Linkset update(String targetPath, IfMatch ifMatch,
-            BiFunction<String, JsonObject, JsonObject> mutation) {
+            BiFunction<LwsResource, JsonObject, JsonObject> mutation) {
         // Told after the transaction commits, not inside it: the listener maintains a derived index
         // and must not see a write that then rolls back.
         String[] changed = new String[1];
@@ -546,7 +643,7 @@ public final class LinksetService implements ResourceCleanup {
             // Sanitized HERE, not at each caller. Every mutation already sanitizes its own input,
             // but this is the single point every one of them passes through, and a bound that
             // depends on five callers each remembering is a bound one new caller removes.
-            JsonObject user = sanitizeUserRelations(mutation.apply(meta.iri(), current));
+            JsonObject user = sanitizeUserRelations(mutation.apply(meta, current));
             // Finding N5. The request-body guard bounds one request and does not compose: a patch
             // that is itself shallow is applied to what is already stored and deepens it, so
             // repeating it grows the stored linkset without limit while every individual request
@@ -647,6 +744,11 @@ public final class LinksetService implements ResourceCleanup {
 
     /** Render the RFC 9264 linkset document (server-managed links first, then user-managed). */
     private String build(LwsResource meta, JsonObject user) {
+        return document(meta, user).toString();
+    }
+
+    /** The linkset document {@link #build} renders: what a GET returns, and what a JSON Patch edits. */
+    private JsonObject document(LwsResource meta, JsonObject user) {
         JsonObjectBuilder anchor = Json.createObjectBuilder();
         anchor.add("anchor", meta.iri());
         // The structural type this server assigns, then any the client has declared. Both are types
@@ -666,7 +768,7 @@ public final class LinksetService implements ResourceCleanup {
         }
         return Json.createObjectBuilder()
                 .add("linkset", Json.createArrayBuilder().add(anchor))
-                .build().toString();
+                .build();
     }
 
     /** The server's structural type for a resource, followed by any the client has declared. */

@@ -254,9 +254,11 @@ public final class StorageDescriptionService {
         for (String rdf : RDF_MEDIA_TYPES) {
             patchMap.add(rdf, arr("application/sparql-update"));
         }
-        patchMap.add("application/json", arr("application/merge-patch+json", "application/json-patch+json"));
+        // JSON Patch first: the format lws10-core requires since w3c/lws-protocol#255, listed first
+        // in the draft's own example; merge patch is still accepted.
+        patchMap.add("application/json", arr("application/json-patch+json", "application/merge-patch+json"));
         patchMap.add("application/linkset+json",
-                arr("application/merge-patch+json", "application/json-patch+json"));
+                arr("application/json-patch+json", "application/merge-patch+json"));
         caps.add(Json.createObjectBuilder().add("type", PATCH_SUPPORT).add("format", patchMap).build());
 
         // ContentNegotiation, one per source format as in the core's example: an RDF resource stored
