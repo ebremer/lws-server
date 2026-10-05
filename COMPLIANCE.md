@@ -1,12 +1,15 @@
 # LWS Protocol Compliance: lws-server
 
-**Date:** 2026-09-22; **last re-reviewed 2026-09-30** against the specifications as they stood on
-**28 September 2026** (`w3c/lws-protocol` @ [`9b03b32`](https://github.com/w3c/lws-protocol/commit/9b03b32)).
-No normative text changed after the baseline, so no code change was needed; see
-[Re-review of 28 September 2026](#re-review-of-28-september-2026).
-**Specification baseline:** the LWS editor's drafts of **21 September 2026** — `w3c/lws-protocol` @
-[`3ddc642`](https://github.com/w3c/lws-protocol/commit/3ddc642) ("Clarify DID support in the SSI-CID
-authentication suite", #233).
+**Date:** 2026-09-22; **last re-reviewed 2026-10-05** against the specifications as they stood on
+**5 October 2026** (`w3c/lws-protocol` @ [`ef02548`](https://github.com/w3c/lws-protocol/commit/ef02548)),
+the text of the core Working Draft W3C published that day. Its one normative change, #255 (JSON
+Patch replaces JSON Merge Patch), needed one code change; see
+[Re-review of 5 October 2026](#re-review-of-5-october-2026).
+**Specification baseline:** the LWS editor's drafts of **5 October 2026** — `w3c/lws-protocol` @
+[`ef02548`](https://github.com/w3c/lws-protocol/commit/ef02548) ("Switch baseline PATCH format from JSON
+Merge Patch to JSON Patch", #255). Before it, the drafts of 21 September 2026 (`3ddc642`, #233), whose
+changes the table [What changed since the previous baseline](#what-changed-since-the-previous-baseline)
+lists.
 **Previous baseline:** the drafts this server was built against between June and August 2026, which
 predate most of the changes listed below. That revision of this document (2026-07-09) is in git
 history.
@@ -15,7 +18,7 @@ history.
 
 ## Short answer
 
-`lws-server` implements the **LWS 1.0 editor's drafts of 21 September 2026**: LWS Core — including
+`lws-server` implements the **LWS 1.0 editor's drafts of 5 October 2026**: LWS Core — including
 the OAuth 2.0 authorization baseline, the controlled-identifier storage description, the notification
 data model and access requests and grants —, the vocabulary, the Type Index and QUERY-based Type
 Search services, the webhook notification suite, and the three current authentication suites. The
@@ -29,9 +32,9 @@ scaffolding. Conformance here is to the text as it stands at the baseline commit
 
 ## Specification status
 
-| Specification | Status at the baseline | Latest on w3.org/TR, 28 Sep 2026 | This server |
+| Specification | Status at the baseline | Latest on w3.org/TR, 5 Oct 2026 | This server |
 |---|---|---|---|
-| [lws10-core](https://w3c.github.io/lws-protocol/lws10-core/) | Editor's Draft, 21 Sep 2026 | Working Draft **21 Sep 2026** — the baseline text | Implemented; see below |
+| [lws10-core](https://w3c.github.io/lws-protocol/lws10-core/) | Editor's Draft, 5 Oct 2026 | Working Draft **5 Oct 2026** — the baseline text | Implemented; see below |
 | [lws10-vocab](https://w3c.github.io/lws-protocol/lws10-vocab/) | Draft (vocabulary 21 Sep 2026) | Group Note Draft 14 Jul 2026 (predates `StorageResource`; the live `ns/lws` namespace document has it) | Terms used as defined, `StorageResource` included |
 | [lws10-index](https://w3c.github.io/lws-protocol/lws10-index/) (was `lws10-searchindex`) | Draft, renamed 21 Sep 2026 | not published (editor's draft only) | Implemented, `QUERY` search |
 | [lws10-notifications-webhook](https://w3c.github.io/lws-protocol/lws10-notifications-webhook/) | Draft (split from `lws10-notifications`, 24 Jul 2026) | not published (editor's draft only) | Implemented |
@@ -39,6 +42,16 @@ scaffolding. Conformance here is to the text as it stands at the baseline commit
 | [lws10-authn-saml](https://w3c.github.io/lws-protocol/lws10-authn-saml/) | Draft | Working Draft 3 Aug 2026 | Implemented when an IdP certificate is configured |
 | [lws10-authn-ssi-cid](https://w3c.github.io/lws-protocol/lws10-authn-ssi-cid/) | Draft; DID subjects since 21 Sep 2026 | Working Draft **21 Sep 2026** — the baseline text | Implemented, with `did:key` and `did:web` subjects |
 | [lws10-authn-ssi-did-key](https://w3c.github.io/lws-protocol/lws10-authn-ssi-did-key/) | **Discontinued** 18 Sep 2026 | Working Draft 3 Aug 2026; published as a **Discontinued Draft on 29 Sep 2026** | Credentials without a `kid` still accepted, deprecated; not advertised |
+
+## Re-review of 5 October 2026
+
+Re-checked on 2026-10-05 against `w3c/lws-protocol` `main` at `ef02548`, the text of the core Working
+Draft W3C published that day (`WD-lws10-core-20261005`). The other Working Drafts on w3.org/TR, and
+`lws-contrib/lws-test-suite` (still `b8cb134`), had not changed.
+
+| Commit | Change | Effect here |
+|---|---|---|
+| #255 (5 Oct) | Servers MUST support and advertise **JSON Patch** (RFC 6902, `application/json-patch+json`) as the baseline patch format, for `PATCH` on resources and on linksets, replacing JSON Merge Patch and its citation of RFC 7386 (which RFC 7396 obsoletes). The storage description example lists JSON Patch first; merge patch stays an optional alternative | JSON Patch was already accepted and advertised, on JSON resources and linksets. On a linkset, though, it was applied to the relation map the links are stored as, so a patch of the document a `GET` returns (`/linkset/0/license`) answered `409`; Touchstone run `4d7187f2` found it (`linkset-patch-json-patch`, and the `describedby` type-search tests). Such a patch is now applied to the document, its result checked as a linkset document for the resource (`422` otherwise); a patch addressing the relations directly still applies to the map. `Accept-Patch` and `PatchSupport` list JSON Patch first. Refused on RDF resources, as merge patch is (divergence 2) |
 
 ## Re-review of 28 September 2026
 
@@ -71,7 +84,7 @@ They are listed here because each would change what a storage server does:
 
 | PR | Proposes | This server today |
 |---|---|---|
-| #255 | JSON Patch (RFC 6902) replaces JSON Merge Patch as the baseline `PATCH` format, for resources and linksets | Already supports and advertises both, for resources and linksets. JSON Patch, like merge patch, is refused on RDF resources (divergence 2 would apply to it as well) |
+| #255 | JSON Patch (RFC 6902) replaces JSON Merge Patch as the baseline `PATCH` format, for resources and linksets | **Merged 5 October**; see [Re-review of 5 October 2026](#re-review-of-5-october-2026). The answer recorded here, that linksets already took it, held only for patches written against the stored relations |
 | #253 | The LWS container shape is required only for `application/lws+json`, no longer for plain `ld+json`/`json` | Serves all three; that still conforms if this merges |
 | #241 | Create into a missing container: `404` explicitly, with no intermediate containers | Already the case |
 | #237 | Moving a resource by `PATCH`ing its `up` link | Not implemented |
@@ -142,10 +155,10 @@ what the server does about it now.
 | Pagination: `first` MUST, `next` when more, opaque links, `200` | Yes (`?page=N`) |
 | Create with `POST`; `Link: <…lws#Container>; rel="type"` for a container; `201` + `Location`; `up`, `linkset` (with `type`), `type` links | Yes |
 | Read: range requests, `ETag`, `Link`s, `HEAD` | Yes |
-| Update: `PUT`/`PATCH`; merge patch MUST be supported | JSON resources and linksets: yes. RDF resources: refused (divergence 2) |
+| Update: `PUT`/`PATCH`; JSON Patch MUST be supported (#255; JSON Merge Patch before it) | JSON resources and linksets: yes, and merge patch as well. RDF resources: refused (divergence 2) |
 | `Prefer: set-linkset` | Yes |
 | Delete: `204`; non-empty container `409` unless `Depth: infinity` | Yes, atomically with its linkset and ACL |
-| Linkset: `application/linkset+json`, `Allow` includes `GET`, `PATCH`; `Accept-Patch: application/merge-patch+json`; `412` on a failed precondition | Yes (`PUT` and JSON Patch as well) |
+| Linkset: `application/linkset+json`, `Allow` includes `GET`, `PATCH`; `Accept-Patch: application/json-patch+json`; `412` on a failed precondition | Yes; a JSON Patch addresses the document a `GET` returns (`PUT` and merge patch as well) |
 | Types in `Link` headers, including user-defined ones | Yes — the types a client declares with `Link: rel="type"` are advertised on `GET`/`HEAD` |
 | `PreferLinkRelations` | `Prefer: include="…"`/`omit="…"` on a linkset read (divergence 7) |
 
@@ -220,7 +233,7 @@ namespaces in its RDF rendering.
 | # | Divergence | Why |
 |---|---|---|
 | 1 | **The storage URI is the root container's URI** | lws10-core allows it ("Storage MAY function as a root container"), and the alternatives are worse: the `realm` must logically contain every resource, so it cannot be a URI no resource starts with, and moving the root would move every resource. `/` therefore answers with the description unless a container representation is requested. A generic `Accept: application/json` gets the listing, since the core makes `json` a container type; a webhook receiver should ask for `application/lws+cid` |
-| 2 | **Merge patch is refused on RDF resources (`415`)** | lws10-core: a server "MUST minimally support JSON Merge Patch". Applying it through the JSON-LD form of a graph destroyed multi-subject graphs (finding H21); SPARQL Update is the RDF patch format. Merge patch works on JSON resources and linksets |
+| 2 | **JSON Patch and merge patch are refused on RDF resources (`415`)** | lws10-core: a server "MUST minimally support JSON Patch" (JSON Merge Patch before #255). Applying either through the JSON-LD form of a graph is unsound: merge patch destroyed multi-subject graphs (finding H21), and the JSON-LD shape is no stable pointer target. SPARQL Update is the RDF patch format. Both JSON formats work on JSON resources and linksets |
 | 3 | **Replacing or patching requires `If-Match` (`428` otherwise)** — resources and linksets | Stricter than the SHOULD; it is what makes lost updates impossible rather than unlikely |
 | 4 | **Authentication credentials are accepted directly by default** | An additional mechanism lws10-core permits, and how every existing client of this server authenticates. `lws.oauth.accept-authentication-credentials=false` turns it off |
 | 5 | **kid-less did:key credentials are accepted** | The discontinued suite's credentials; the SSI-CID suite requires a `kid`. Deprecated, not advertised |

@@ -58,10 +58,18 @@ otherwise href-based.
 
 ## Updating the linkset
 
-The user-managed portion is updated with `application/merge-patch+json`
-([RFC 7386](https://www.rfc-editor.org/rfc/rfc7386)) or `application/json-patch+json`
-([RFC 6902](https://www.rfc-editor.org/rfc/rfc6902)), or replaced wholesale with `PUT` of an
-`application/linkset+json` document. These writes are **conditional**: a missing `If-Match` is refused
+The user-managed portion is updated with `application/json-patch+json`
+([RFC 6902](https://www.rfc-editor.org/rfc/rfc6902)), the patch format lws10-core requires since
+w3c/lws-protocol#255, or `application/merge-patch+json`
+([RFC 7396](https://www.rfc-editor.org/rfc/rfc7396)), or replaced wholesale with `PUT` of an
+`application/linkset+json` document. `Accept-Patch` lists JSON Patch first.
+
+A JSON Patch addresses the document a `GET` returns, whose one link context object, `/linkset/0`, is
+the resource's own: `[{"op": "add", "path": "/linkset/0/license", "value": [{"href": "…"}]}]` adds a
+license and `remove` takes it away. What the patch leaves must still be a linkset document for the
+resource (otherwise `422`); its relations become the user-managed links, and server-managed ones are
+ignored. A patch whose pointers address the relations directly (`/license`) is applied to the stored
+relation map instead, as it always was. These writes are **conditional**: a missing `If-Match` is refused
 with `428`, a stale one with `412`. A JSON Patch whose `test` operation fails or whose JSON Pointer is
 unresolvable yields `409`.
 
