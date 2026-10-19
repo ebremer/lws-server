@@ -254,9 +254,17 @@ public final class HttpSupport {
 
     /** Render an RFC 9457 problem-details object for an error status. */
     public static byte[] problemJson(int status, String detail) {
+        return problemJson(status, null, detail);
+    }
+
+    /**
+     * Render an RFC 9457 problem-details object with a title of its own, or with the status's
+     * reason phrase when {@code title} is {@code null}.
+     */
+    public static byte[] problemJson(int status, String title, String detail) {
         return jakarta.json.Json.createObjectBuilder()
                 .add("type", "about:blank")
-                .add("title", reasonPhrase(status))
+                .add("title", title == null ? reasonPhrase(status) : title)
                 .add("status", status)
                 .add("detail", detail == null ? "" : detail)
                 .build().toString().getBytes(StandardCharsets.UTF_8);

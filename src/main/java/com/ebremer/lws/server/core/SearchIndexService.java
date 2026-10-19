@@ -335,6 +335,12 @@ public final class SearchIndexService implements ResourceEventListener {
      * cannot interleave with the one-time build (an event arriving before the build is dropped — the
      * build then reads current store state, including that write — and one arriving after applies
      * incrementally). Authorization is unaffected: it is always evaluated live, per request.
+     *
+     * <p>A {@code MOVE} is one event for a whole subtree — a moved container's descendants raise
+     * none of their own — so it re-keys every entry at or, for a container, under the previous IRI,
+     * and loads each one's types afresh at its new IRI. Afresh rather than carried over: the types a
+     * resource's content asserts are found by its content graph's name, which moved with it, while
+     * the content itself is not rebased, so what it asserts about its previous IRI no longer counts.
      */
     @Override
     public void onResourceEvent(ResourceEvent event) {
@@ -345,6 +351,8 @@ public final class SearchIndexService implements ResourceEventListener {
             try {
                 if (event.kind() == ActivityKind.DELETE) {
                     typeCache.remove(event.iri());
+                } else if (event.kind() == ActivityKind.MOVE) {
+                    relocate(event.previousIri(), event.iri());
                 } else {
                     Set<String> types = rdfStore.read(conn -> loadTypesFor(conn, event.iri(), event.type()));
                     typeCache.put(event.iri(), Set.copyOf(types));
@@ -360,6 +368,23 @@ public final class SearchIndexService implements ResourceEventListener {
                         event.iri(), e.toString());
             }
         }
+    }
+
+    /** Re-key the entries at or under {@code from} (a container's IRI ends in {@code /}) to {@code to}. */
+    private void relocate(String from, String to) {
+        List<String> moved = typeCache.keySet().stream()
+                .filter(iri -> iri.equals(from) || (from.endsWith("/") && iri.startsWith(from)))
+                .toList();
+        moved.forEach(typeCache::remove);
+        Map<String, Set<String>> relocated = rdfStore.read(conn -> {
+            Map<String, Set<String>> out = new HashMap<>();
+            for (String iri : moved) {
+                String now = to + iri.substring(from.length());
+                out.put(now, loadTypesFor(conn, now, structuralOf(conn, now)));
+            }
+            return out;
+        });
+        relocated.forEach((iri, types) -> typeCache.put(iri, Set.copyOf(types)));
     }
 
     /** Full scan: each resource's structural type (admin graph) plus the types it asserts about itself. */

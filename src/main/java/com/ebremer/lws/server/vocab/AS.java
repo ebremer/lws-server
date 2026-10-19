@@ -7,7 +7,7 @@ import org.apache.jena.rdf.model.Resource;
 
 /**
  * A minimal subset of the Activity Streams 2.0 vocabulary, used to express
- * the {@code Create} / {@code Update} / {@code Delete} activities carried inside
+ * the {@code Create} / {@code Update} / {@code Delete} / {@code Move} activities carried inside
  * LWS notification envelopes.
  *
  * <p>Namespace: {@code https://www.w3.org/ns/activitystreams#}.
@@ -32,6 +32,8 @@ public final class AS {
     public static final Resource Create = M.createResource(NS + "Create");
     public static final Resource Update = M.createResource(NS + "Update");
     public static final Resource Delete = M.createResource(NS + "Delete");
+    /** Required of a server that lets clients move resources between containers (lws10-core). */
+    public static final Resource Move = M.createResource(NS + "Move");
 
     // Properties.
     public static final Property actor = M.createProperty(NS + "actor");

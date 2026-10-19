@@ -87,6 +87,10 @@ public final class LwsConfiguration {
     // Container listing pagination: a listing larger than this is split into pages.
     private final int containerPageSize;
 
+    // Moving resources between containers (lws10-core, Moving Resources): the resource types whose
+    // `up` link a client may change, in the order the MoveResource capability lists them.
+    private final List<String> moveAppliesTo;
+
     // Access Requests & Grants (lws10-core/lws-access-requests).
     private final boolean accessRequestsEnabled;
     private final String accessControllerInbox;
@@ -237,6 +241,10 @@ public final class LwsConfiguration {
         this.searchIndexEnabled = getBoolean(p, "lws.search-index.enabled", true);
         this.searchIndexPageSize = getInt(p, "lws.search-index.page-size", 100, 1, Integer.MAX_VALUE);
         this.containerPageSize = getInt(p, "lws.container.page-size", 1000, 1, Integer.MAX_VALUE);
+        // Read raw rather than through get(), which treats a blank value as unset: here an empty
+        // value is a deliberate answer ("nothing moves"), not a missing one.
+        String moves = p.getProperty("lws.move.applies-to");
+        this.moveAppliesTo = parseMoveAppliesTo(moves == null ? MOVE_TYPES_DEFAULT : moves);
         this.accessRequestsEnabled = getBoolean(p, "lws.access-requests.enabled", true);
         this.accessControllerInbox = get(p, "lws.access-requests.controller-inbox", "");
         this.quotaMaxBytes = getLong(p, "lws.quota.max-bytes", 0, 0, Long.MAX_VALUE);
@@ -829,6 +837,33 @@ public final class LwsConfiguration {
                 "Invalid configuration: " + key + " must be " + expected + " (got \"" + value + "\").");
     }
 
+    /** The Storage Resource types a MoveResource capability can name, in the order it lists them. */
+    private static final List<String> MOVE_TYPES = List.of("DataResource", "Container");
+
+    private static final String MOVE_TYPES_DEFAULT = "DataResource,Container";
+
+    /**
+     * Parse {@code lws.move.applies-to}: a comma-separated subset of {@code DataResource} and
+     * {@code Container}, or empty / {@code none} for no moves at all.
+     *
+     * <p>Refused rather than ignored when it names anything else. The value decides both what the
+     * storage description promises and which {@code up} changes are carried out, and a typo that
+     * silently dropped a type would leave the two agreeing with each other and not with the operator.
+     */
+    private static List<String> parseMoveAppliesTo(String value) {
+        if (value.isBlank() || value.trim().equalsIgnoreCase("none")) {
+            return List.of();
+        }
+        Set<String> named = new LinkedHashSet<>();
+        for (String type : parseList(value)) {
+            String canonical = MOVE_TYPES.stream().filter(t -> t.equalsIgnoreCase(type)).findFirst()
+                    .orElseThrow(() -> error("lws.move.applies-to", value,
+                            "a comma-separated subset of DataResource and Container, or none"));
+            named.add(canonical);
+        }
+        return MOVE_TYPES.stream().filter(named::contains).toList();
+    }
+
     private static List<String> parseList(String csv) {
         if (csv == null || csv.isBlank()) {
             return List.of();
@@ -1064,6 +1099,21 @@ public final class LwsConfiguration {
      */
     public boolean oauthAcceptCredentials() {
         return oauthAcceptCredentials;
+    }
+
+    /**
+     * The Storage Resource types whose {@code up} link a client may change, moving them between
+     * containers ({@code lws.move.applies-to}): {@code DataResource}, {@code Container}, both (the
+     * default) or neither. Exactly what the storage description's {@code MoveResource} capability
+     * advertises as its {@code appliesTo}, and empty when it advertises none.
+     */
+    public List<String> moveAppliesTo() {
+        return moveAppliesTo;
+    }
+
+    /** Whether a client may move a resource of this kind between containers. */
+    public boolean movable(boolean container) {
+        return moveAppliesTo.contains(container ? "Container" : "DataResource");
     }
 
     /** Whether a notification names the agent that made the change. */

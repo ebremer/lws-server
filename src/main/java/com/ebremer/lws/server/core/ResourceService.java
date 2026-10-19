@@ -89,6 +89,7 @@ public final class ResourceService {
     private final Clock clock;
     private final List<ResourceEventListener> listeners = new CopyOnWriteArrayList<>();
     private final List<ResourceCleanup> cleanups = new CopyOnWriteArrayList<>();
+    private final List<ResourceRelocation> relocations = new CopyOnWriteArrayList<>();
     private volatile DeleteAudience deleteAudience;
 
     public ResourceService(RdfStore rdf, BinaryStore blobs, ResourceRegistry registry,
@@ -115,9 +116,19 @@ public final class ResourceService {
     }
 
     /**
+     * Register store-local state that must follow a resource to its new IRI when it moves to another
+     * container — an ACL graph, a linkset row — in the same transaction as the move. Like a cleanup,
+     * a relocation that fails takes the move down with it. See {@link ResourceRelocation}.
+     */
+    public void addRelocation(ResourceRelocation relocation) {
+        relocations.add(relocation);
+    }
+
+    /**
      * Supply the decision about who may be told that a resource was deleted. Consulted before the
      * delete transaction opens, because after it the resource's own ACL is gone. See
-     * {@link DeleteAudience}.
+     * {@link DeleteAudience}. A move consults it too, for the same reason: after the move the
+     * resource's previous IRI, and whatever governed access to it, are gone.
      */
     public void setDeleteAudience(DeleteAudience audience) {
         this.deleteAudience = audience;
@@ -773,6 +784,9 @@ public final class ResourceService {
                 for (ResourceCleanup cleanup : cleanups) {
                     cleanup.onDelete(conn, r.iri());
                 }
+                // A previous identifier that led here now leads nowhere, and one this resource
+                // occupied is free again: neither may answer 301 once the resource is gone.
+                MoveRecords.forget(conn, r.iri());
                 // A member with no captured audience tells nobody: the fail-closed direction, and
                 // the one the old `parent == null ||` fallback got backwards.
                 events.add(new ResourceEvent(ActivityKind.DELETE, r.iri(), r.type(), webId(principal), now,
@@ -783,6 +797,256 @@ public final class ResourceService {
             }
         });
         events.forEach(this::emit);
+    }
+
+    // ----- Move (a change of the up link, requested through the resource's linkset) -----
+
+    /**
+     * What a move needs to have learnt before its write transaction opens: who could read the moved
+     * resource at its previous IRI (the subscriptions a {@code MOVE} that takes it out of their view
+     * may still tell, as a {@code Delete}). Captured for one IRI; a move of any other resource gets
+     * nobody, which is the fail-closed direction, as for a delete.
+     */
+    record MovePreparation(String iri, Set<String> audience) {
+
+        /** Nothing captured: a move that was not foreseen tells nobody about its previous IRI. */
+        static final MovePreparation NONE = new MovePreparation(null, Set.of());
+
+        Set<String> audienceFor(String movedIri) {
+            return movedIri.equals(iri) ? audience : Set.of();
+        }
+    }
+
+    /** A move carried out: the resource as it now is, and the event to announce once it commits. */
+    record Moved(LwsResource resource, ResourceEvent event) {
+    }
+
+    /**
+     * Resolve, outside any transaction, what a move of {@code iri} into {@code destinationIri} will
+     * need: the authorization inputs of every decision {@link #move} makes, and the audience of its
+     * notification.
+     *
+     * <p>The same discipline as a recursive delete. The subtree a container's move must authorize is
+     * known only from the store, so it is enumerated here in a read transaction, which takes no writer
+     * lock, and each member's DELETE warmed before the write transaction opens (H16: nothing may
+     * fetch over the network with the writer lock held). The decisions inside the transaction are the
+     * authoritative ones; a member that appears in between simply gets no warm-up. And the audience
+     * has to be asked for now, while the resource and whatever governs it are still at the previous
+     * IRI — afterwards the question would be answered about a resource that is no longer there.
+     *
+     * <p>Advisory, like {@link #prepare}: it decides nothing and raises nothing.
+     */
+    MovePreparation prepareMove(LwsPrincipal principal, String iri, String destinationIri) {
+        List<String> members = rdf.read(conn -> registry.find(conn, iri)
+                .map(r -> r.isContainer()
+                        ? subtree(conn, r).stream().map(LwsResource::iri).toList() : List.of(iri))
+                .orElse(List.of(iri)));
+        members.forEach(member -> prepare(principal, member, AclMode.DELETE));
+        // READ as well: a refusal asks it of the refused target to choose between 403 and 404, and
+        // an absent destination asks it of the container the destination would have been in.
+        prepare(principal, iri, AclMode.READ);
+        prepare(principal, destinationIri, AclMode.APPEND);
+        prepare(principal, destinationIri, AclMode.READ);
+        String destinationPath = Iris.toPath(config.baseUri(), destinationIri);
+        if (destinationPath != null && Iris.parentPath(destinationPath) != null) {
+            prepare(principal, pathToIri(Iris.parentPath(destinationPath)), AclMode.READ);
+        }
+        DeleteAudience hook = deleteAudience;
+        return new MovePreparation(iri, hook == null ? Set.of() : hook.subscribersAllowedToKnow(iri));
+    }
+
+    /**
+     * Move {@code resource} into the container {@code destinationIri}, inside the caller's write
+     * transaction (lws10-core, Moving Resources). Called by {@link LinksetService} when a write to
+     * the resource's linkset changes its {@code up} link, so the {@code If-Match} compare, the move
+     * and the rest of the linkset write commit together or not at all.
+     *
+     * <p><b>Refusals, in order.</b> Moving off, or not for this kind of resource: {@code 409}, before
+     * anything about the destination is looked at. A destination outside this storage: {@code 409}.
+     * A container into itself or one of its descendants: {@code 409} with the draft's problem title,
+     * decided from the two IRIs alone. Then the authorizations the draft requires — "authorized both
+     * to perform the delete resource operation on the resource being moved and to perform the create
+     * resource operation in the destination container" — made the way {@code delete} and
+     * {@code create} make them: DELETE on the resource; the destination looked up, an absent one
+     * refused through {@link #absent}, then APPEND on it, then "not a container" (after APPEND, so a
+     * caller who may not create there is not told what is there); then DELETE on every descendant,
+     * which for a container is the authorization of a recursive delete of the whole subtree (refused
+     * as one would be, but see {@link #authorizeDescendant}). All of it before anything changes, so
+     * a refusal anywhere leaves everything as it was.
+     *
+     * <p><b>The new IRI.</b> This server derives a resource's IRI from its container's, so the moved
+     * resource becomes {@code <destination><name>} (a container with its {@code /}) and does not keep
+     * its identifier; the storage description says {@code preservesIdentifier: false}. Its name is
+     * kept unless the destination already holds one like it, in which case a free one is chosen the
+     * way {@link #create} chooses one for a colliding {@code Slug}. Every descendant's IRI changes by
+     * the same prefix.
+     *
+     * <p><b>What moves.</b> For the resource and every descendant: the registry entry (its IRI and
+     * parent; created, modified, owner and content pointers kept, the opaque binary key included);
+     * an RDF source's content graph, which is named by the resource's IRI; and, through each
+     * registered {@link ResourceRelocation}, the linkset metadata and the ACL. Both containers are
+     * touched, as a create and a delete touch them. A record of the move is kept so the previous IRI
+     * can answer {@code 301} ({@link #movedTo}).
+     *
+     * <p><b>What does not.</b> Content and user-defined metadata are unchanged, as the draft
+     * requires. In particular RDF content is <em>not</em> rebased: its triples keep the absolute IRIs
+     * they were parsed to, including any that named the resource by its previous IRI. Access grants
+     * and subscriptions name IRIs too and are left as they are: they are policy and intent, which
+     * refer to identifiers, and the draft says outright that a move may change who can access what.
+     */
+    Moved move(RDFConnection conn, LwsPrincipal principal, LwsResource resource, String destinationIri,
+            MovePreparation prepared) {
+        if (destinationIri.equals(resource.parentIri())) {
+            // The caller decides what is a move; naming the container the resource is already in
+            // is not one, and carrying it out would rename the resource against itself.
+            throw new IllegalStateException("Not a move: " + resource.iri() + " is already in "
+                    + destinationIri);
+        }
+        String kind = resource.isContainer() ? "Container" : "DataResource";
+        if (!config.movable(resource.isContainer())) {
+            throw config.moveAppliesTo().isEmpty()
+                    ? LwsException.conflict("This storage does not move resources between containers; "
+                            + "the up link is managed by the server")
+                    : LwsException.conflict("This storage does not move a " + kind + " (its MoveResource "
+                            + "capability applies to " + String.join(", ", config.moveAppliesTo()) + ")");
+        }
+        String iri = resource.iri();
+        String path = Iris.toPath(config.baseUri(), iri);
+        if (path == null || Iris.isRoot(path) || resource.parentIri() == null) {
+            throw LwsException.conflict("The storage root is in no container and cannot be moved");
+        }
+        String destinationPath = Iris.toPath(config.baseUri(), destinationIri);
+        if (destinationPath == null) {
+            throw LwsException.conflict("Moving into another storage is not supported: "
+                    + destinationIri + " is not a container of this storage");
+        }
+        if (resource.isContainer() && destinationPath.equals(path)) {
+            throw LwsException.conflict("Cannot move a container into itself",
+                    destinationIri + " is the container being moved");
+        }
+        if (resource.isContainer() && Iris.isWithin(path, destinationPath)) {
+            throw LwsException.conflict("Cannot move a container into one of its own descendants",
+                    destinationIri + " is a descendant of " + iri);
+        }
+        authorize(principal, iri, AclMode.DELETE);
+        LwsResource destination = registry.find(conn, destinationIri)
+                .orElseThrow(() -> absent(principal, destinationIri, AclMode.APPEND));
+        authorize(principal, destinationIri, AclMode.APPEND);
+        if (!destination.isContainer()) {
+            throw LwsException.conflict("The up link must name a container, and " + destinationIri
+                    + " is a data resource");
+        }
+        // Descendants first, the resource itself last, as a recursive delete lists them.
+        List<LwsResource> members = resource.isContainer() ? subtree(conn, resource) : List.of(resource);
+        for (LwsResource member : members) {
+            if (!member.iri().equals(iri)) {
+                authorizeDescendant(principal, iri, member.iri());
+            }
+        }
+
+        String name = Iris.lastSegment(path);
+        String suffix = resource.isContainer() ? "/" : "";
+        String newPath = destinationPath + name + suffix;
+        if (registry.exists(conn, pathToIri(newPath))) {
+            newPath = destinationPath + chooseName(conn, destinationPath, name, resource.type()) + suffix;
+        } else {
+            requireCreatablePath(newPath);
+        }
+        String newIri = pathToIri(newPath);
+        // The moved resource first, then its descendants, by prefix: under a container, every IRI is
+        // the container's followed by the rest of its path, and that rest does not change.
+        Map<String, String> moved = new LinkedHashMap<>();
+        moved.put(iri, newIri);
+        for (LwsResource member : members) {
+            moved.putIfAbsent(member.iri(), newIri + member.iri().substring(iri.length()));
+        }
+
+        Instant now = now();
+        LwsResource relocated = null;
+        for (LwsResource member : members) {
+            String to = moved.get(member.iri());
+            String parent = member.iri().equals(iri) ? destinationIri : moved.get(member.parentIri());
+            if (member.type() == ResourceType.RDF_SOURCE) {
+                // Copied as it is, NOT rebased: the triples keep the absolute IRIs they were parsed
+                // to, the resource's previous IRI included. Content is unaffected by a move.
+                Model content = ModelFactory.createDefaultModel().add(conn.fetch(member.iri()));
+                conn.put(to, content);
+                conn.delete(member.iri());
+            }
+            // A container's tag is derived from its IRI, so it is derived again: what it lists now
+            // carries new IRIs too. A data resource's tag names its content, which has not changed.
+            String etag = member.isContainer() && member.modified() != null
+                    ? Etags.of(to, member.modified().toString()) : member.etag();
+            LwsResource entry = new LwsResource(to, member.type(), parent, member.created(), member.modified(),
+                    etag, member.contentType(), member.size(), member.binaryKey(), member.owner(),
+                    member.digest());
+            registry.delete(conn, member.iri());
+            registry.put(conn, entry);
+            if (member.iri().equals(iri)) {
+                relocated = entry;
+            }
+        }
+        for (ResourceRelocation relocation : relocations) {
+            relocation.onMove(conn, moved);
+        }
+        MoveRecords.record(conn, iri, newIri);
+        registry.find(conn, resource.parentIri()).ifPresent(p -> registry.put(conn, touch(p, now)));
+        registry.put(conn, touch(destination, now));
+        // One event for the move, about the resource whose up link changed; its descendants moved
+        // with it and raise none of their own (lws10-core: "a single Move activity").
+        ResourceEvent event = ResourceEvent.moved(newIri, iri, resource.type(), webId(principal), now,
+                prepared.audienceFor(iri), resource.parentIri(), destinationIri);
+        return new Moved(relocated, event);
+    }
+
+    /**
+     * Refuse to move a container holding a resource this principal may not delete, with the status
+     * a recursive delete would answer — but without naming the descendant to a caller who may not
+     * read it. The caller can see the container it asked to move; the members it may not read are
+     * hidden from its listing, and a refusal that spelt one out would undo that.
+     */
+    private void authorizeDescendant(LwsPrincipal principal, String movedIri, String descendantIri) {
+        if (authorizer.allows(principal, descendantIri, AclMode.DELETE)) {
+            return;
+        }
+        LwsException refusal = denied(principal, descendantIri, AclMode.DELETE);
+        if (authorizer.allows(principal, descendantIri, AclMode.READ)) {
+            throw refusal;
+        }
+        throw new LwsException(refusal.status(), "Not authorized to move " + movedIri
+                + ": it holds resources this agent may not delete");
+    }
+
+    /** Tell the listeners about a change made in a transaction that has now committed. */
+    void announce(ResourceEvent event) {
+        emit(event);
+    }
+
+    /**
+     * Where a request for a previous identifier of a moved resource should be redirected, if this
+     * principal may be told (lws10-core, Moving Resources: the previous identifiers of a resource and
+     * of its auxiliary resources SHOULD answer {@code 301}).
+     *
+     * <p>Empty unless all three hold: nothing is stored at {@code iri} now, a move record applies
+     * (the resource's own, or that of the nearest container it moved with), and what it leads to
+     * exists and is something the principal may do {@code mode} to. The caller asks only when it was
+     * about to refuse, and on an empty answer refuses exactly as it would have: the draft's privacy
+     * considerations note that a redirect discloses where the resource went and advise applying "the
+     * same access control to such responses as to the moved resource itself", and a redirect handed
+     * to anyone else would be an existence oracle with the address attached.
+     */
+    public Optional<String> movedTo(String iri, LwsPrincipal principal, AclMode mode) {
+        String target = rdf.read(conn -> {
+            if (registry.exists(conn, iri)) {
+                return null; // a resource created at a previous IRI takes precedence
+            }
+            String to = MoveRecords.lookup(conn, config.baseUri(), iri,
+                    ancestor -> registry.exists(conn, ancestor));
+            return to != null && registry.exists(conn, to) ? to : null;
+        });
+        // Outside the transaction, so a WAC decision may resolve a group document it has not cached.
+        return target != null && authorizer.allows(principal, target, mode)
+                ? Optional.of(target) : Optional.empty();
     }
 
     /** Who may be told about each of these resources, asked before any of them is removed. */

@@ -228,8 +228,9 @@ public final class StorageDescriptionService {
     /**
      * The capability objects advertised on the storage (lws10-core, Storage Capabilities): the
      * specifications this server implements (type only), {@code PatchSupport} — which PATCH formats
-     * each target format accepts, keyed {@code format} as in the core's own example —, one
-     * {@code ContentNegotiation} per RDF source format, and the RFC 9530 digest algorithms.
+     * each target format accepts, keyed {@code format} as in the core's own example —,
+     * {@code MoveResource} unless moving is off, one {@code ContentNegotiation} per RDF source
+     * format, and the RFC 9530 digest algorithms.
      */
     private List<JsonObject> capabilities() {
         List<JsonObject> caps = new ArrayList<>();
@@ -260,6 +261,21 @@ public final class StorageDescriptionService {
         patchMap.add("application/linkset+json",
                 arr("application/json-patch+json", "application/merge-patch+json"));
         caps.add(Json.createObjectBuilder().add("type", PATCH_SUPPORT).add("format", patchMap).build());
+
+        // MoveResource (lws10-core, Moving Resources): a client may change the `up` link of the
+        // resource types named in lws.move.applies-to, and a server that lets it MUST say so here —
+        // and MUST NOT say so when it does not, so the capability is left out entirely when moving is
+        // off. appliesTo is always written out, because its absence would mean "data resources
+        // only". preservesIdentifier is false because this server derives an IRI from the resource's
+        // place in the containment hierarchy: a moved resource gets the IRI of its new place, and
+        // the response to the move reports it (Content-Location, and the linkset's anchor).
+        if (!config.moveAppliesTo().isEmpty()) {
+            caps.add(Json.createObjectBuilder()
+                    .add("type", "MoveResource")
+                    .add("appliesTo", arr(config.moveAppliesTo()))
+                    .add("preservesIdentifier", false)
+                    .build());
+        }
 
         // ContentNegotiation, one per source format as in the core's example: an RDF resource stored
         // in any supported serialisation can be read back in any of the others.
@@ -332,7 +348,12 @@ public final class StorageDescriptionService {
                 String s = ((JsonString) value).getString();
                 out.add(IRI_VALUED.contains(key) ? m.createResource(expandType(s)) : m.createLiteral(s));
             }
-            case NUMBER, TRUE, FALSE -> out.add(m.createLiteral(value.toString()));
+            case NUMBER -> out.add(m.createLiteral(value.toString()));
+            // xsd:boolean, as JSON-LD makes a JSON boolean and as the lws/v1 context types
+            // MoveResource's preservesIdentifier. A plain "false" string would read as true to any
+            // consumer that tests the value for presence or for a non-empty lexical form.
+            case TRUE, FALSE ->
+                    out.add(m.createTypedLiteral(value.getValueType() == JsonValue.ValueType.TRUE));
             default -> { /* null: no statement */ }
         }
         return out;

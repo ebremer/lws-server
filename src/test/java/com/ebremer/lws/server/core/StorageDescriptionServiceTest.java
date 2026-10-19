@@ -168,6 +168,78 @@ class StorageDescriptionServiceTest {
         assertTrue(root, "the StorageRoot service, in the CID vocabulary");
     }
 
+    // ----- MoveResource (lws10-core, Moving Resources) -----
+
+    /**
+     * By default this storage moves both kinds of resource, and says it does not keep a moved
+     * resource's identifier: its IRIs are derived from the containment hierarchy.
+     */
+    @Test
+    void describesTheMoveResourceCapabilityByDefault() {
+        Properties p = new Properties();
+        p.setProperty("lws.base-uri", "http://storage.example");
+        JsonObject move = capabilityNamed(describe(p).getJsonArray("capability"), "MoveResource");
+        assertNotNull(move, "a server that lets clients change the up link MUST describe MoveResource");
+        assertEquals(java.util.List.of("DataResource", "Container"), stringsOf(move.getJsonArray("appliesTo")));
+        assertEquals(JsonValue.FALSE, move.get("preservesIdentifier"),
+                "a boolean, and false: a moved resource gets the IRI of its new place");
+    }
+
+    /** The RDF rendering says the same thing, in the terms the lws/v1 context maps them to. */
+    @Test
+    void theRdfRenderingDescribesTheSameMoveResourceCapability() {
+        Properties p = new Properties();
+        p.setProperty("lws.base-uri", "http://storage.example");
+        org.apache.jena.rdf.model.Model m = new StorageDescriptionService(withOwner(p)).buildModel();
+        org.apache.jena.rdf.model.Property capability = m.getProperty("https://www.w3.org/ns/lws#capability");
+        org.apache.jena.rdf.model.Resource move = m.getResource("http://storage.example/")
+                .listProperties(capability).toList().stream()
+                .map(st -> st.getObject().asResource())
+                .filter(c -> c.hasProperty(org.apache.jena.vocabulary.RDF.type,
+                        m.getResource("https://www.w3.org/ns/lws#MoveResource")))
+                .findFirst().orElse(null);
+        assertNotNull(move, "an lws:MoveResource capability node");
+        org.apache.jena.rdf.model.Property appliesTo = m.getProperty("https://www.w3.org/ns/lws#appliesTo");
+        assertEquals(java.util.Set.of("DataResource", "Container"), move.listProperties(appliesTo).toList()
+                .stream().map(st -> st.getString()).collect(java.util.stream.Collectors.toSet()));
+        org.apache.jena.rdf.model.Literal preserves = move.getProperty(
+                m.getProperty("https://www.w3.org/ns/lws#preservesIdentifier")).getLiteral();
+        assertEquals(org.apache.jena.datatypes.xsd.XSDDatatype.XSDboolean, preserves.getDatatype(),
+                "xsd:boolean, as the lws/v1 context types it");
+        assertFalse(preserves.getBoolean());
+    }
+
+    @Test
+    void aStorageThatMovesOnlyDataResourcesSaysSo() {
+        Properties p = new Properties();
+        p.setProperty("lws.base-uri", "http://storage.example");
+        p.setProperty("lws.move.applies-to", "DataResource");
+        JsonObject move = capabilityNamed(describe(p).getJsonArray("capability"), "MoveResource");
+        assertNotNull(move);
+        assertEquals(java.util.List.of("DataResource"), stringsOf(move.getJsonArray("appliesTo")),
+                "a server that does not move containers MUST NOT include Container in appliesTo");
+    }
+
+    @Test
+    void aStorageThatMovesNothingDescribesNoMoveResourceCapability() {
+        for (String off : new String[] {"none", ""}) {
+            Properties p = new Properties();
+            p.setProperty("lws.base-uri", "http://storage.example");
+            p.setProperty("lws.move.applies-to", off);
+            assertNull(capabilityNamed(describe(p).getJsonArray("capability"), "MoveResource"),
+                    "a server that does not allow moves MUST NOT describe MoveResource (" + off + ")");
+        }
+    }
+
+    private static JsonObject capabilityNamed(JsonArray caps, String type) {
+        for (JsonValue v : caps) {
+            if (type.equals(v.asJsonObject().getString("type", null))) {
+                return v.asJsonObject();
+            }
+        }
+        return null;
+    }
+
     private static LwsConfiguration withOwner(Properties p) {
         p.putIfAbsent("lws.owners", "https://owner.example/profile#me");
         return LwsConfiguration.of(p);
