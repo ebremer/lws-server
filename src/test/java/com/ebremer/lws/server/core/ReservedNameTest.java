@@ -63,6 +63,8 @@ class ReservedNameTest {
                 // Reserved whether or not TLS automation is currently on: a name that becomes
                 // shadowed the day an operator enables it is a name no resource should have taken.
                 "/.well-known/acme-challenge", "/.well-known/acme-challenge/token",
+                // The protected resource metadata of every resource lives under this one path.
+                "/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/c/x",
                 // Case-insensitively, because over-reserving is free and under-reserving is the bug.
                 "/x.ACL", "/c/x.Meta", "/APP/x",
                 // Anchored the way Iris.toIri anchors it, so a caller that omits the leading slash

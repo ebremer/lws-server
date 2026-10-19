@@ -48,8 +48,9 @@ import com.ebremer.lws.server.tools.DidKeyTool;
 /**
  * The LWS authorization framework over real sockets (lws10-core, Authorization): the embedded
  * authorization server's metadata and token exchange, the storage's validation of the access tokens
- * it — or a trusted external authorization server — issues, the {@code as_uri}/{@code realm}
- * challenge that tells a client where to go, and DPoP-bound tokens (RFC 9449 §5).
+ * it — or a trusted external authorization server — issues, the challenge whose
+ * {@code resource_metadata} (RFC 9728) tells a client where to go, and DPoP-bound tokens
+ * (RFC 9449 §5).
  *
  * <p>Two storages: one with the defaults, which still honours an authentication credential
  * presented directly, and one with {@code lws.oauth.accept-authentication-credentials=false}, which
@@ -176,18 +177,20 @@ class LwsAuthorizationTest {
     }
 
     /**
-     * A 401 names the authorization server and the storage (lws10-core, Authorization Server
-     * Discovery): {@code as_uri} is where to get a token, {@code realm} what to ask it for — and
-     * the requested URI is logically contained in the realm.
+     * A 401 points to the protected resource metadata of the resource requested and links to the
+     * storage (lws10-core, Authorization Server Discovery): {@code resource_metadata} is where to
+     * find the authorization server, the {@code Link} what to ask it for. By default the challenge
+     * still carries the {@code as_uri} and {@code realm} of the drafts before 19 October 2026,
+     * after {@code resource_metadata}.
      */
     @Test
     void aRefusalCarriesAConformingChallenge() throws Exception {
+        String metadata = baseUrl + "/.well-known/oauth-protected-resource" + DOC;
         HttpResponse<String> r = send("GET", baseUrl + DOC, null, null, null);
         assertEquals(401, r.statusCode());
         List<String> challenges = r.headers().allValues("WWW-Authenticate");
-        assertTrue(challenges.stream().anyMatch(c -> c.startsWith(
-                "Bearer as_uri=\"" + baseUrl + "\", realm=\"" + baseUrl + "/\"")), challenges.toString());
-        assertTrue((baseUrl + DOC).startsWith(baseUrl + "/"), "the realm contains the request URI");
+        assertTrue(challenges.contains("Bearer resource_metadata=\"" + metadata + "\", as_uri=\"" + baseUrl
+                + "\", realm=\"" + baseUrl + "/\""), challenges.toString());
         assertTrue(r.headers().allValues("Link")
                 .contains("<" + baseUrl + "/>; rel=\"https://www.w3.org/ns/lws#storage\""));
 
@@ -195,7 +198,74 @@ class LwsAuthorizationTest {
         HttpResponse<String> bad = send("GET", baseUrl + DOC, "Bearer not.a.token", null, null);
         assertEquals(401, bad.statusCode());
         assertTrue(bad.headers().firstValue("WWW-Authenticate").orElse("")
-                .startsWith("Bearer as_uri=\"" + baseUrl + "\", realm=\"" + baseUrl + "/\", error=\"invalid_token\""));
+                .startsWith("Bearer resource_metadata=\"" + metadata + "\", as_uri=\"" + baseUrl + "\", realm=\""
+                        + baseUrl + "/\", error=\"invalid_token\""), bad.headers().toString());
+        assertTrue(bad.headers().allValues("Link")
+                .contains("<" + baseUrl + "/>; rel=\"https://www.w3.org/ns/lws#storage\""));
+    }
+
+    /**
+     * The whole of discovery as a client following lws10-core, Discovery Validation by a Client,
+     * performs it, from nothing but a refusal: the {@code resource_metadata} URL is on the requested
+     * URI's origin; the metadata's {@code resource} is identical to the requested URI and its
+     * {@code authorization_servers} names this storage's own server first, then the trusted external
+     * one; the first one's RFC 8414 metadata is this server's; the linked storage's description has
+     * its storage root on the same origin; and the storage URI, sent as {@code resource}, yields a
+     * token for exactly that audience which then reads the resource.
+     */
+    @Test
+    void aClientFollowsTheChallengeToAToken() throws Exception {
+        String requested = baseUrl + DOC + "?view=full";
+        HttpResponse<String> refused = send("GET", requested, null, null, null);
+        assertEquals(401, refused.statusCode());
+        String challenge = refused.headers().allValues("WWW-Authenticate").stream()
+                .filter(c -> c.startsWith("Bearer ")).findFirst().orElseThrow();
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("resource_metadata=\"([^\"]+)\"").matcher(challenge);
+        assertTrue(m.find(), challenge);
+        URI metadataUrl = URI.create(m.group(1));
+        URI requestedUri = URI.create(requested);
+        assertEquals(requestedUri.getScheme() + "://" + requestedUri.getRawAuthority(),
+                metadataUrl.getScheme() + "://" + metadataUrl.getRawAuthority(), "same scheme and authority");
+
+        HttpResponse<String> prm = send("GET", metadataUrl.toString(), null, null, null);
+        assertEquals(200, prm.statusCode(), prm.body());
+        assertTrue(prm.headers().firstValue("Content-Type").orElse("").startsWith("application/json"));
+        JsonObject metadata = parse(prm.body());
+        assertEquals(requested, metadata.getString("resource"), "RFC 9728 section 3.3: identical to the request");
+        assertEquals(Json.createArrayBuilder().add(baseUrl).add(externalIssuer).build(),
+                metadata.getJsonArray("authorization_servers"), "the embedded server first, then the trusted one");
+
+        // RFC 8414 section 3.1: the well-known suffix between the issuer's host and its path.
+        String issuer = metadata.getJsonArray("authorization_servers").getString(0);
+        URI issuerUri = URI.create(issuer);
+        String asMetadataUrl = issuerUri.getScheme() + "://" + issuerUri.getRawAuthority()
+                + "/.well-known/lws-configuration"
+                + (issuerUri.getRawPath() == null || issuerUri.getRawPath().equals("/") ? "" : issuerUri.getRawPath());
+        HttpResponse<String> as = send("GET", asMetadataUrl, null, null, null);
+        assertEquals(200, as.statusCode());
+        assertEquals(issuer, parse(as.body()).getString("issuer"), "this server's authorization server metadata");
+
+        String storage = refused.headers().allValues("Link").stream()
+                .filter(l -> l.endsWith("rel=\"https://www.w3.org/ns/lws#storage\""))
+                .map(l -> l.substring(1, l.indexOf('>'))).findFirst().orElseThrow();
+        HttpResponse<String> description = http.send(HttpRequest.newBuilder(URI.create(storage))
+                .header("Accept", "application/lws+cid").GET().build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, description.statusCode());
+        String root = parse(description.body()).getJsonArray("service").stream()
+                .map(jakarta.json.JsonValue::asJsonObject)
+                .filter(s -> "StorageRoot".equals(s.getString("type", null)))
+                .map(s -> s.getString("serviceEndpoint")).findFirst().orElseThrow();
+        URI rootUri = URI.create(root);
+        assertEquals(requestedUri.getScheme() + "://" + requestedUri.getRawAuthority(),
+                rootUri.getScheme() + "://" + rootUri.getRawAuthority(), "the storage root is on the same origin");
+
+        String credential = DidKeyTool.mint(java.util.Base64.getUrlDecoder().decode(ownerSeed), 3600, issuer).token();
+        HttpResponse<String> token = token(baseUrl, form("grant_type", TOKEN_EXCHANGE, "resource", storage,
+                "subject_token", credential, "subject_token_type", JWT_TYPE), null);
+        assertEquals(200, token.statusCode(), token.body());
+        String accessToken = parse(token.body()).getString("access_token");
+        assertEquals(List.of(storage), SignedJWT.parse(accessToken).getJWTClaimsSet().getAudience());
+        assertEquals(200, send("GET", requested, "Bearer " + accessToken, null, null).statusCode());
     }
 
     // ----- token exchange -----
@@ -272,8 +342,13 @@ class LwsAuthorizationTest {
         // Each check lws10-core names refuses the request on its own.
         assertEquals(401, read(externalToken(claims("https://other.example/").build(), "at+jwt")),
                 "aud names another storage");
-        assertEquals(401, read(externalToken(claims(baseUrl + "/").audience(List.of(baseUrl + "/",
-                "https://other.example/")).build(), "at+jwt")), "aud with more than one value");
+        // lws10-core (19 October 2026): aud "includes" the storage's URI — no longer "exactly one".
+        assertEquals(200, read(externalToken(claims(baseUrl + "/").audience(List.of(baseUrl + "/",
+                "https://other.example/")).build(), "at+jwt")), "aud naming this storage among others");
+        assertEquals(200, read(externalToken(claims(baseUrl + "/").audience(List.of("https://other.example/",
+                baseUrl)).build(), "at+jwt")), "aud naming this storage, without its slash, second");
+        assertEquals(401, read(externalToken(claims(baseUrl + "/").audience(List.of("https://other.example/",
+                "https://another.example/")).build(), "at+jwt")), "aud naming only other storages");
         assertEquals(401, read(externalToken(claims(baseUrl + "/")
                 .expirationTime(new Date(System.currentTimeMillis() - 120_000)).build(), "at+jwt")), "expired");
         assertEquals(401, read(externalToken(claims(baseUrl + "/")

@@ -24,6 +24,7 @@ import com.ebremer.lws.server.http.BasePathRedirectFilter;
 import com.ebremer.lws.server.http.CorsFilter;
 import com.ebremer.lws.server.http.JwksServlet;
 import com.ebremer.lws.server.http.LwsResourceServlet;
+import com.ebremer.lws.server.http.ProtectedResourceMetadataServlet;
 import com.ebremer.lws.server.http.SearchIndexServlet;
 import com.ebremer.lws.server.http.StorageDescriptionServlet;
 import com.ebremer.lws.server.http.SubscriptionServlet;
@@ -142,6 +143,20 @@ public class LwsServletConfig {
                 new ServletRegistrationBean<>(servlet, LwsConfiguration.AS_METADATA_PATH);
         bean.setName("lwsAuthorizationServerMetadata");
         bean.setEnabled(c.tokenExchange() != null);
+        return bean;
+    }
+
+    /**
+     * This storage's protected resource metadata (RFC 9728) under
+     * {@code /.well-known/oauth-protected-resource}, which every 401 points to. Always registered:
+     * with no authorization server it answers 404 itself.
+     */
+    @Bean
+    public ServletRegistrationBean<ProtectedResourceMetadataServlet> protectedResourceMetadataServlet(
+            LwsComponents c) {
+        ServletRegistrationBean<ProtectedResourceMetadataServlet> bean = new ServletRegistrationBean<>(
+                new ProtectedResourceMetadataServlet(c.config()), ProtectedResourceMetadataServlet.PATH + "/*");
+        bean.setName("lwsProtectedResourceMetadata");
         return bean;
     }
 

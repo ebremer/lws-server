@@ -151,21 +151,25 @@ public final class HttpSupport {
 
     /**
      * Set the headers a {@code 401} response should carry: the {@code WWW-Authenticate} challenges
-     * and a {@code Link} to the storage (lws10-core, Authorization Server Discovery).
+     * and a {@code Link} to the storage (lws10-core, Authorization Server Discovery, which requires
+     * both).
      *
      * <p>Every scheme this storage accepts, not just Bearer: RFC 9110 §11.6.1 lets a 401 carry more
      * than one challenge, and a client that can only do DPoP had no way to discover that this server
-     * speaks it. Each challenge is a conforming one — {@code as_uri} naming the authorization server
-     * that issues this storage's access tokens, {@code realm} naming the storage — so a client can
-     * find where to get a token, and what to ask for, from the refusal alone. The scheme-specific
-     * 401s raised inside {@code AuthenticationFilter} name the single scheme the request actually
-     * used; this is the generic one, raised where no scheme was chosen yet.
+     * speaks it. Each challenge is a conforming one — see {@link #challenge} — so a client can find
+     * where to get a token from the refusal alone, and what to ask for from the {@code Link}: the
+     * storage URI it sends as the token request's {@code resource}. The scheme-specific 401s raised
+     * inside {@code AuthenticationFilter} name the single scheme the request actually used; this is
+     * the generic one, raised where no scheme was chosen yet.
+     *
+     * @param request the refused request, whose URL the challenges' {@code resource_metadata} names
      */
-    public static void setUnauthorizedHeaders(HttpServletResponse response, LwsConfiguration config) {
-        response.setHeader("WWW-Authenticate", challenge("Bearer", config, null, null));
-        response.addHeader("WWW-Authenticate", challenge("DPoP", config, null, null));
+    public static void setUnauthorizedHeaders(HttpServletRequest request, HttpServletResponse response,
+            LwsConfiguration config) {
+        response.setHeader("WWW-Authenticate", challenge("Bearer", config, request, null, null));
+        response.addHeader("WWW-Authenticate", challenge("DPoP", config, request, null, null));
         if (!config.samlTrustedIssuers().isEmpty()) {
-            response.addHeader("WWW-Authenticate", challenge("SAML2", config, null, null));
+            response.addHeader("WWW-Authenticate", challenge("SAML2", config, request, null, null));
         }
         addStorageLink(response, config);
     }
@@ -173,33 +177,62 @@ public final class HttpSupport {
     /**
      * One {@code WWW-Authenticate} challenge in the lws10-core shape.
      *
-     * <p>{@code as_uri} is the issuer of the authorization server a client should ask, and is the
-     * {@code iss} of the access token it will get; {@code realm} is the storage URI, which the
-     * token's {@code aud} will carry and which a client must check logically contains the URI it
-     * requested. Both are REQUIRED of a conforming challenge; {@code as_uri} is left out only when
-     * this storage names no authorization server at all, which configuration warns about. A DPoP
-     * challenge also lists the proof algorithms this server verifies (RFC 9449 §7.1).
+     * <p>A conforming challenge carries {@code resource_metadata} (RFC 9728 section 5.1): the URL of
+     * the protected resource metadata <em>of the resource requested</em>, built from the URL the
+     * client sent — {@code lws.base-uri} and the raw request path, as every IRI here is — by
+     * {@link ProtectedResourceMetadataServlet#metadataUrl}. Not the storage root's metadata: a client
+     * checks that the document's {@code resource} is identical to the URL it requested (lws10-core,
+     * Discovery Validation by a Client), so one URL for every refusal would be one no client could
+     * use. The parameter is left out only when this storage names no authorization server at all,
+     * which configuration warns about: there is then no conforming metadata to point to.
      *
+     * <p>After it, while {@code lws.oauth.legacy-challenge} is on (the default), come the two
+     * parameters the drafts of 5 October 2026 required instead and the current ones no longer
+     * mention: {@code as_uri}, the issuer of the first authorization server, and {@code realm}, the
+     * storage URI. lws10-core lets a challenge carry other parameters, and clients written against
+     * those drafts still look for them. A DPoP challenge also lists the proof algorithms this server
+     * verifies (RFC 9449 §7.1), and a refusal of a presented credential its error.
+     *
+     * @param request          the refused request, whose URL {@code resource_metadata} describes
      * @param error            an RFC 6750 error code, or {@code null} for a bare challenge
      * @param errorDescription human-readable detail for {@code error}, or {@code null}
      */
-    public static String challenge(String scheme, LwsConfiguration config, String error, String errorDescription) {
-        StringBuilder sb = new StringBuilder(scheme).append(' ');
+    public static String challenge(String scheme, LwsConfiguration config, HttpServletRequest request,
+            String error, String errorDescription) {
+        List<String> params = new ArrayList<>();
         String as = config.primaryAuthorizationServer();
-        if (as != null && !scheme.equalsIgnoreCase("SAML2")) {
-            sb.append("as_uri=\"").append(quote(as)).append("\", ");
+        if (as != null) {
+            params.add("resource_metadata=\"" + quote(ProtectedResourceMetadataServlet.metadataUrl(
+                    config, requestPath(request), request.getQueryString())) + '"');
         }
-        sb.append("realm=\"").append(quote(config.storageIri())).append('"');
+        if (config.oauthLegacyChallenge()) {
+            // SAML2 never named an authorization server: the assertion is presented here directly.
+            if (as != null && !scheme.equalsIgnoreCase("SAML2")) {
+                params.add("as_uri=\"" + quote(as) + '"');
+            }
+            params.add("realm=\"" + quote(config.storageIri()) + '"');
+        }
         if (scheme.equalsIgnoreCase("DPoP")) {
-            sb.append(", algs=\"").append(DPOP_ALGS).append('"');
+            params.add("algs=\"" + DPOP_ALGS + '"');
         }
         if (error != null) {
-            sb.append(", error=\"").append(quote(error)).append('"');
+            params.add("error=\"" + quote(error) + '"');
             if (errorDescription != null) {
-                sb.append(", error_description=\"").append(quote(errorDescription)).append('"');
+                params.add("error_description=\"" + quote(errorDescription) + '"');
             }
         }
-        return sb.toString();
+        return params.isEmpty() ? scheme : scheme + ' ' + String.join(", ", params);
+    }
+
+    /**
+     * The request path as this server received it — raw, still percent-encoded, without the context
+     * path — or {@code /} when it is empty: the same reconstruction the servlets mint IRIs from.
+     */
+    private static String requestPath(HttpServletRequest request) {
+        String uri = request.getRequestURI();
+        String ctx = request.getContextPath();
+        String p = (ctx != null && !ctx.isEmpty() && uri.startsWith(ctx)) ? uri.substring(ctx.length()) : uri;
+        return p.isEmpty() ? "/" : p;
     }
 
     /** Escape a value for an RFC 9110 quoted-string: backslash and double quote, nothing else. */
@@ -210,7 +243,7 @@ public final class HttpSupport {
     /**
      * Add the link from a Storage Resource to its storage: {@code rel="https://www.w3.org/ns/lws#storage"}
      * with the canonical storage URI as target. lws10-core requires it on every {@code GET} and
-     * {@code HEAD} response for a Storage Resource, and recommends it on a {@code 401}.
+     * {@code HEAD} response for a Storage Resource, and on a {@code 401}.
      */
     public static void addStorageLink(HttpServletResponse response, LwsConfiguration config) {
         response.addHeader("Link", "<" + config.storageIri() + ">; rel=\"" + REL_STORAGE + "\"");

@@ -45,7 +45,13 @@ import com.ebremer.lws.server.core.LwsPrincipal;
  *       {@code /.well-known/lws-configuration}. Keys are cached and re-fetched when a token names a
  *       {@code kid} the cache does not have, which is what key rotation needs;</li>
  *   <li><b>issuer</b>: {@code iss} is a trusted authorization server;</li>
- *   <li><b>audience</b>: {@code aud} holds exactly one value, and it identifies this storage;</li>
+ *   <li><b>audience</b>: {@code aud} includes the URI of this storage — the storage that contains
+ *       every resource it serves. The drafts before 19 October 2026 required {@code aud} to hold
+ *       exactly one value; the current ones require only that it include the storage's URI, so a
+ *       token whose {@code aud} is an array naming this storage among others is accepted. That is
+ *       the authorization server's choice to make, and lws10-core's Audience Binding consideration
+ *       warns it against it: any other audience could replay the token here. A token that does not
+ *       name this storage at all is refused, as before;</li>
  *   <li><b>time</b>: before {@code exp}, not before {@code nbf}, {@code iat} not in the future —
  *       each with the usual clock-skew allowance.</li>
  * </ul>
@@ -137,8 +143,8 @@ public final class AccessTokenValidator implements CredentialValidator {
                 return Optional.empty();
             }
             List<String> aud = claims.getAudience();
-            if (aud == null || aud.size() != 1 || !audiences.contains(aud.get(0))) {
-                log.debug("access token: aud {} is not exactly this storage", aud);
+            if (aud == null || aud.stream().noneMatch(audiences::contains)) {
+                log.debug("access token: aud {} does not include this storage", aud);
                 return Optional.empty();
             }
             if (!timely(claims)) {

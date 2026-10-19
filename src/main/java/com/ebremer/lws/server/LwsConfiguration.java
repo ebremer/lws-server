@@ -121,6 +121,8 @@ public final class LwsConfiguration {
     private final long oauthAccessTokenLifetimeSeconds;
     private final Set<String> oauthTrustedIssuers;
     private final boolean oauthAcceptCredentials;
+    // Whether a 401 challenge still carries the as_uri/realm the drafts before 19 October 2026 required.
+    private final boolean oauthLegacyChallenge;
 
     // Notifications: whether the envelope names the agent that made the change (lws10-core says the
     // actor SHOULD be omitted by default and MAY be configurable).
@@ -291,6 +293,9 @@ public final class LwsConfiguration {
         }
         this.oauthTrustedIssuers = issuers;
         this.oauthAcceptCredentials = getBoolean(p, "lws.oauth.accept-authentication-credentials", true);
+        // On by default: the parameters cost a client that ignores them nothing, and clients
+        // written against the drafts of 5 October 2026 find their authorization server by them.
+        this.oauthLegacyChallenge = getBoolean(p, "lws.oauth.legacy-challenge", true);
         this.notificationsIncludeActor = getBoolean(p, "lws.notifications.include-actor", false);
         Set<String> loadHosts = new LinkedHashSet<>();
         for (String host : parseSet(get(p, "lws.sparql-update.allowed-hosts", ""))) {
@@ -419,8 +424,10 @@ public final class LwsConfiguration {
         }
         if (!oauthEnabled && oauthTrustedIssuers.isEmpty()) {
             log.warn("lws.oauth.enabled=false and lws.oauth.trusted-issuers is empty: this storage "
-                    + "names no authorization server, so its 401 challenges cannot carry the as_uri "
-                    + "lws10-core requires and no client can obtain an access token for it.{}",
+                    + "names no authorization server, so it has no protected resource metadata "
+                    + "(RFC 9728; lws10-core requires its authorization_servers to name one), its 401 "
+                    + "challenges cannot carry the resource_metadata lws10-core requires, and no "
+                    + "client can obtain an access token for it.{}",
                     oauthAcceptCredentials ? " Authentication credentials presented directly are "
                             + "still accepted (lws.oauth.accept-authentication-credentials)." : "");
         }
@@ -872,13 +879,16 @@ public final class LwsConfiguration {
 
     /**
      * The canonical URI of the storage (lws10-core, Discovery): the {@code id} of the storage
-     * description, the target of every {@code rel="https://www.w3.org/ns/lws#storage"} link, the
-     * {@code realm} of this storage's challenges and the one {@code aud} its access tokens carry.
+     * description, the target of every {@code rel="https://www.w3.org/ns/lws#storage"} link —
+     * including the one on a {@code 401}, which is where a client takes the {@code resource} of its
+     * token request from — and so the {@code aud} its access tokens carry (lws10-core,
+     * Authorization).
      *
-     * <p>It is the root container's URI, as lws10-core permits, because the realm has to logically
-     * contain every resource a client sends a token to — a URI no resource path starts with could
-     * not — and because it is the value this server's access grants and notifications have always
-     * carried as {@code storage}.
+     * <p>It is the root container's URI, as lws10-core permits, because it then contains every
+     * resource a client sends a token to — a URI no resource path starts with could not, and a
+     * client deciding which token to present for a URI has only containment to go by — and because
+     * it is the value this server's access grants and notifications have always carried as
+     * {@code storage}.
      */
     public String storageIri() {
         return storageRootIri();
@@ -941,6 +951,13 @@ public final class LwsConfiguration {
     /** Where the embedded authorization server publishes its metadata (lws10-core, RFC 8414). */
     public static final String AS_METADATA_PATH = "/.well-known/lws-configuration";
 
+    /**
+     * Where this storage publishes its OAuth 2.0 protected resource metadata (lws10-core, Protected
+     * Resource Metadata; RFC 9728 section 3). The metadata of a resource is at this path followed by
+     * the resource's own path, so the whole tree under it is served and reserved.
+     */
+    public static final String PROTECTED_RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource";
+
     public String storageDescriptionIri() {
         return baseUri + storageDescriptionPath();
     }
@@ -1001,14 +1018,44 @@ public final class LwsConfiguration {
     }
 
     /**
-     * The authorization server a {@code 401} names in its {@code as_uri}: the embedded one when it
-     * is enabled, otherwise the first trusted external one, otherwise {@code null}.
+     * The issuers of every authorization server whose access tokens this storage accepts, as its
+     * protected resource metadata lists them in {@code authorization_servers}: the embedded one
+     * first when it is enabled, because it is the one that certainly issues tokens for this storage,
+     * then the trusted external ones in configuration order, each once. Empty when there are none.
+     */
+    public List<String> authorizationServers() {
+        Set<String> servers = new LinkedHashSet<>();
+        if (oauthEnabled) {
+            servers.add(oauthIssuer());
+        }
+        servers.addAll(oauthTrustedIssuers);
+        return List.copyOf(servers);
+    }
+
+    /**
+     * The authorization server a client is pointed to first — the first of
+     * {@link #authorizationServers()} — or {@code null} when this storage names none. When it is
+     * {@code null} there is no conforming protected resource metadata, so a {@code 401} carries no
+     * {@code resource_metadata} (and, with {@link #oauthLegacyChallenge()}, no {@code as_uri}).
      */
     public String primaryAuthorizationServer() {
-        if (oauthEnabled) {
-            return oauthIssuer();
-        }
-        return oauthTrustedIssuers.isEmpty() ? null : oauthTrustedIssuers.iterator().next();
+        List<String> servers = authorizationServers();
+        return servers.isEmpty() ? null : servers.get(0);
+    }
+
+    /**
+     * Whether a {@code 401} challenge also carries the {@code as_uri} and {@code realm} parameters
+     * ({@code lws.oauth.legacy-challenge}, default {@code true}).
+     *
+     * <p>The drafts of 5 October 2026 required both; those of 19 October 2026 replaced them with
+     * RFC 9728's {@code resource_metadata}, which every challenge carries regardless. lws10-core
+     * still allows "other headers and parameters", and a client written against the earlier drafts
+     * finds its authorization server by {@code as_uri}, so they are kept, after
+     * {@code resource_metadata}, until such clients are gone; {@code false} sends only what the
+     * current drafts define.
+     */
+    public boolean oauthLegacyChallenge() {
+        return oauthLegacyChallenge;
     }
 
     /**
@@ -1229,9 +1276,10 @@ public final class LwsConfiguration {
      * <p>These namespaces are reserved: the {@code .acl} and {@code .meta} suffixes, which the
      * request router diverts to the access-control and linkset handlers; the configured system
      * prefix (default {@code /.lws}); the {@code /app} and {@code /callback} trees, which the
-     * console and login filters occupy; and the {@code /.well-known/acme-challenge} and
-     * {@code /.well-known/lws-configuration} paths, where the ACME responder and the authorization
-     * server metadata are served. The rest of {@code /.well-known/} is left to the storage — a
+     * console and login filters occupy; and the {@code /.well-known/acme-challenge},
+     * {@code /.well-known/lws-configuration} and {@code /.well-known/oauth-protected-resource}
+     * paths, where the ACME responder, the authorization server metadata and the protected resource
+     * metadata are served. The rest of {@code /.well-known/} is left to the storage — a
      * {@code did:web} owner may want its {@code did.json} there.
      *
      * <p>This must be a <em>superset</em> of what the router hides. Reserving more than is shadowed
@@ -1253,7 +1301,8 @@ public final class LwsConfiguration {
                 || isUnder(p, UI_PREFIX)
                 || isUnder(p, CALLBACK_PATH)
                 || isUnder(p, ACME_CHALLENGE_PREFIX)
-                || isUnder(p, AS_METADATA_PATH);
+                || isUnder(p, AS_METADATA_PATH)
+                || isUnder(p, PROTECTED_RESOURCE_METADATA_PATH);
     }
 
     private static boolean isUnder(String path, String prefix) {

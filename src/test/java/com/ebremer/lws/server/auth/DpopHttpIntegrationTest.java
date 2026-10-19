@@ -315,7 +315,8 @@ class DpopHttpIntegrationTest {
     void theSaml2SchemeDoesNotCarryAJwt() throws Exception {
         HttpResponse<String> r = withScheme("SAML2", setupToken);
         assertEquals(401, r.statusCode(), detail(r));
-        assertEquals("SAML2 realm=\"" + baseUrl + "/\", error=\"invalid_token\", "
+        assertEquals("SAML2 resource_metadata=\"" + resourceMetadata(baseUrl) + "\", realm=\"" + baseUrl
+                + "/\", error=\"invalid_token\", "
                 + "error_description=\"the SAML2 scheme carries a SAML assertion, not a JWT\"",
                 challenge(r));
     }
@@ -481,16 +482,23 @@ class DpopHttpIntegrationTest {
 
     /**
      * The challenge {@code AuthenticationFilter.unauthorized} builds for the DPoP scheme: the
-     * lws10-core shape — the authorization server to get a token from ({@code as_uri}) and the
-     * storage as {@code realm} — plus the proof algorithms, the error and its description.
+     * lws10-core shape — the protected resource metadata of the resource requested
+     * ({@code resource_metadata}, RFC 9728), then the {@code as_uri} and {@code realm} kept for
+     * clients of the earlier drafts — plus the proof algorithms, the error and its description.
      */
     private static String dpopChallenge(String description) {
         return dpopChallenge(baseUrl, "invalid_token", description);
     }
 
     private static String dpopChallenge(String base, String error, String description) {
-        return "DPoP as_uri=\"" + base + "\", realm=\"" + base + "/\", algs=\"" + DPOP_ALGS
-                + "\", error=\"" + error + "\", error_description=\"" + description + "\"";
+        return "DPoP resource_metadata=\"" + resourceMetadata(base) + "\", as_uri=\"" + base + "\", realm=\""
+                + base + "/\", algs=\"" + DPOP_ALGS + "\", error=\"" + error + "\", error_description=\""
+                + description + "\"";
+    }
+
+    /** The protected resource metadata URL of {@link #DOC} (RFC 9728 section 3.1). */
+    private static String resourceMetadata(String base) {
+        return base + "/.well-known/oauth-protected-resource" + DOC;
     }
 
     /** The challenge {@code AuthenticationFilter.dpopNonceChallenge} builds, on the nonce server. */

@@ -100,7 +100,7 @@ public final class LwsResourceServlet extends HttpServlet {
             }
         } catch (LwsException e) {
             if (e.status() == 401) {
-                HttpSupport.setUnauthorizedHeaders(resp, config);
+                HttpSupport.setUnauthorizedHeaders(req, resp, config);
             }
             // Allow lists the methods the target supports, so it is right for a state conflict
             // ("not a container", "container is not empty") but wrong for a reserved name, where

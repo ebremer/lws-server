@@ -172,6 +172,34 @@ class AuthenticationFilterTest {
         verify(chain, never()).doFilter(any(), any());
     }
 
+    /**
+     * A request the container mapped to the protected resource metadata is not authenticated: the
+     * refused token a client may still be sending must not stand between it and the document that
+     * says where to get a new one. It goes on anonymously; the same token anywhere else is refused.
+     */
+    @Test
+    void theProtectedResourceMetadataIsNotAuthenticated() throws Exception {
+        HttpServletRequest request = requestWith("Bearer not.a.token");
+        when(request.getRequestURI()).thenReturn("/.well-known/oauth-protected-resource/doc");
+        when(request.getServletPath()).thenReturn("/.well-known/oauth-protected-resource");
+        HttpServletResponse response = committingResponse(new AtomicBoolean());
+        FilterChain chain = mock(FilterChain.class);
+
+        filter(config(true)).doFilter(request, response, chain);
+
+        verify(response, never()).sendError(anyInt(), anyString());
+        verify(response, never()).setHeader(eq("WWW-Authenticate"), anyString());
+        verify(chain).doFilter(request, response);
+        verify(request, never()).setAttribute(eq(AuthenticationFilter.PRINCIPAL_ATTR), any());
+
+        HttpServletResponse elsewhere = committingResponse(new AtomicBoolean());
+        filter(config(true)).doFilter(requestWith("Bearer not.a.token"), elsewhere, mock(FilterChain.class));
+        verify(elsewhere).sendError(eq(HttpServletResponse.SC_UNAUTHORIZED), anyString());
+        verify(elsewhere).setHeader(eq("WWW-Authenticate"),
+                argThat(c -> c.startsWith("DPoP resource_metadata=\"" + BASE
+                        + "/.well-known/oauth-protected-resource/doc\"")));
+    }
+
     @Test
     void detectsSenderConstraintOnTokensAndIgnoresNonJwtCredentials() {
         String bound = AuthTestSupport.signEdDSAWithCnf(

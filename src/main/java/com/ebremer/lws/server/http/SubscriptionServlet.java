@@ -101,7 +101,7 @@ public final class SubscriptionServlet extends HttpServlet {
             }
         } catch (LwsException e) {
             if (e.status() == 401) {
-                HttpSupport.setUnauthorizedHeaders(resp, config);
+                HttpSupport.setUnauthorizedHeaders(req, resp, config);
             }
             if (e.status() == 405) {
                 // Mandatory on a 405 (RFC 9110 §15.5.6). AccessServlet is a near-verbatim twin of

@@ -29,9 +29,14 @@ import com.ebremer.lws.server.core.LwsPrincipal;
  * <ul>
  *   <li>{@code iss} — this authorization server, which is this storage's base URI;</li>
  *   <li>{@code sub} and {@code client_id} — the credential's subject and client, both URIs;</li>
- *   <li>{@code aud} — exactly the storage URI, which is the only {@code resource} accepted: this
- *       authorization server issues tokens for this storage and refuses every other one, as
- *       lws10-core requires of an unknown or untrusted storage;</li>
+ *   <li>{@code aud} — exactly the storage URI, and nothing else, which is the only {@code resource}
+ *       accepted (spelled with or without its trailing slash): lws10-core requires the
+ *       {@code resource} to be the URI of the storage that contains the requested resource, as the
+ *       {@code rel="https://www.w3.org/ns/lws#storage"} link of the {@code 401} gave it, and this
+ *       authorization server issues tokens for this storage only and refuses every other one with
+ *       {@code invalid_target}, as lws10-core requires of an unknown or untrusted storage. A single
+ *       audience is what lws10-core's Audience Binding consideration asks of an authorization
+ *       server, so the token cannot be replayed by one storage to another;</li>
  *   <li>{@code exp}, {@code iat}, {@code jti} — a lifetime of
  *       {@code lws.oauth.access-token-lifetime-seconds} (300 by default, as lws10-core recommends),
  *       never outliving the credential it was exchanged for;</li>
@@ -48,7 +53,11 @@ public final class TokenExchange {
     public static final String TYPE_JWT = "urn:ietf:params:oauth:token-type:jwt";
     public static final String TYPE_SAML2 = "urn:ietf:params:oauth:token-type:saml2";
     public static final String TYPE_ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_token";
-    /** The spelling lws10-core's own metadata example uses; accepted as {@link #TYPE_ID_TOKEN}. */
+    /**
+     * The spelling lws10-core's own metadata example used until the drafts of 19 October 2026, which
+     * corrected it to RFC 8693's {@link #TYPE_ID_TOKEN}; still accepted as that, for clients written
+     * against the earlier example.
+     */
     private static final String TYPE_ID_TOKEN_HYPHENATED = "urn:ietf:params:oauth:token-type:id-token";
 
     /** An OAuth 2.0 error response (RFC 6749 §5.2). */
