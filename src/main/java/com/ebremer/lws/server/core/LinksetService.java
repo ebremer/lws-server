@@ -1,6 +1,9 @@
 package com.ebremer.lws.server.core;
 
 import java.io.StringReader;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -45,9 +48,18 @@ import org.slf4j.LoggerFactory;
  * — via {@code Prefer: set-linkset}
  * on a resource write — the request's {@code Link} headers. It is removed when its resource is deleted.
  *
+ * <p><b>The {@code up} link</b> is server-managed, but it is also how a client moves a resource to
+ * another container (lws10-core, Moving Resources): every write of the linkset resource itself — a
+ * JSON Patch of the document, a JSON Merge Patch in either form, a PUT — works out which {@code up}
+ * the client asked for. The one it already has leaves the resource where it is; another one is a move,
+ * carried out by {@link ResourceService} in the same transaction as the rest of the write. Before
+ * moves existed a changed {@code up} was dropped like any other server-managed relation and the
+ * write answered {@code 204} having moved nothing, which is exactly what the draft forbids of a
+ * server that does not describe a {@code MoveResource} capability.
+ *
  * @author Erich Bremer
  */
-public final class LinksetService implements ResourceCleanup {
+public final class LinksetService implements ResourceCleanup, ResourceRelocation {
 
     private static final Logger log = LoggerFactory.getLogger(LinksetService.class);
 
@@ -321,8 +333,33 @@ public final class LinksetService implements ResourceCleanup {
         this.config = config;
     }
 
-    /** A serialized linkset and its entity-tag. */
-    public record Linkset(String json, String etag) {
+    /**
+     * A serialized linkset and its entity-tag. {@code movedTo} is the resource's new IRI when the
+     * write that produced this linkset moved the resource to another container, else {@code null};
+     * the linkset then describes the resource under that IRI, and is itself at its linkset address.
+     */
+    public record Linkset(String json, String etag, String movedTo) {
+
+        public Linkset(String json, String etag) {
+            this(json, etag, null);
+        }
+
+        /** Whether the write that produced this linkset moved its resource. */
+        public boolean moved() {
+            return movedTo != null;
+        }
+    }
+
+    /**
+     * What a write of the linkset asks for: the relations to keep as user-managed metadata (not yet
+     * sanitized), and what it says about the {@code up} link — the hrefs of the targets it leaves,
+     * as written; an empty list if it removes the link; {@code null} if it does not mention it.
+     */
+    private record Proposal(JsonObject user, List<String> up) {
+
+        static Proposal of(JsonObject user) {
+            return new Proposal(user, null);
+        }
     }
 
     /**
@@ -347,8 +384,20 @@ public final class LinksetService implements ResourceCleanup {
 
     /** Replace the user-managed links, honouring the client {@code If-Match} precondition. */
     public Linkset put(String targetPath, byte[] body, IfMatch ifMatch) {
-        JsonObject replacement = sanitizeUserRelations(firstMember(parseObject(body)));
-        return update(targetPath, ifMatch, current -> replacement);
+        return put(targetPath, body, ifMatch, null);
+    }
+
+    /**
+     * Replace the user-managed links on behalf of {@code principal}, who must be authorized for a
+     * move if the document asks for one. A document that leaves {@code up} out keeps it; one that
+     * states it asks for that container, as any other write of the linkset does.
+     */
+    public Linkset put(String targetPath, byte[] body, IfMatch ifMatch, LwsPrincipal principal) {
+        JsonObject member = firstMember(parseObject(body));
+        List<String> up = upOf(member);
+        JsonObject replacement = sanitizeUserRelations(member);
+        return update(targetPath, ifMatch, principal, up != null,
+                (meta, current) -> new Proposal(replacement, up));
     }
 
     /** Apply a JSON Merge Patch (RFC 7396) to the user-managed links. */
@@ -370,6 +419,15 @@ public final class LinksetService implements ResourceCleanup {
      * Server-managed relations in either form are ignored, as everywhere else.
      */
     public Linkset patch(String targetPath, byte[] body, IfMatch ifMatch) {
+        return patch(targetPath, body, ifMatch, null);
+    }
+
+    /**
+     * {@link #patch(String, byte[], IfMatch)} on behalf of {@code principal}. In either form an
+     * {@code up} member asks for that container — {@code null} asks for none, which is refused — and
+     * one left out leaves the resource where it is.
+     */
+    public Linkset patch(String targetPath, byte[] body, IfMatch ifMatch, LwsPrincipal principal) {
         JsonValue patch;
         try {
             patch = JsonMergePatch.read(body);
@@ -378,11 +436,15 @@ public final class LinksetService implements ResourceCleanup {
         }
         JsonArray document = linksetDocument(patch);
         if (document != null) {
-            return update(targetPath, ifMatch, (meta, current) -> sanitizeUserRelations(
-                    asObject(JsonMergePatch.apply(current, relationsOf(document, meta.iri())))));
+            return update(targetPath, ifMatch, principal, true, (meta, current) -> {
+                JsonObject relations = relationsOf(document, meta.iri());
+                return new Proposal(asObject(JsonMergePatch.apply(current, relations)), upOf(relations));
+            });
         }
-        return update(targetPath, ifMatch,
-                current -> sanitizeUserRelations(asObject(JsonMergePatch.apply(current, patch))));
+        List<String> up = patch.getValueType() == JsonValue.ValueType.OBJECT
+                ? upOf(patch.asJsonObject()) : null;
+        return update(targetPath, ifMatch, principal, up != null,
+                (meta, current) -> new Proposal(asObject(JsonMergePatch.apply(current, patch)), up));
     }
 
     /**
@@ -450,13 +512,34 @@ public final class LinksetService implements ResourceCleanup {
      * server-managed relation the map never holds. The merge patch accepts both forms the same way.
      */
     public Linkset jsonPatch(String targetPath, byte[] body, IfMatch ifMatch) {
+        return jsonPatch(targetPath, body, ifMatch, null);
+    }
+
+    /**
+     * {@link #jsonPatch(String, byte[], IfMatch)} on behalf of {@code principal}.
+     *
+     * <p>A patch of the document is how lws10-core has a client move a resource: it replaces
+     * {@code /linkset/0/up/0/href}, usually after a {@code test} of the anchor or of the current
+     * target. Whatever {@code up} the patched document leaves is what the client asked for — the
+     * one it had, another container, or none, which is refused. The relation map never holds
+     * {@code up}, so a patch addressed to it that makes one appear is refused with a pointer to the
+     * document form, rather than dropped.
+     */
+    public Linkset jsonPatch(String targetPath, byte[] body, IfMatch ifMatch, LwsPrincipal principal) {
         JsonArray patch = JsonPatch.read(body);
         if (addressesDocument(patch)) {
-            return update(targetPath, ifMatch, (meta, current) ->
-                    userRelationsOf(JsonPatch.apply(document(meta, current), patch), meta.iri()));
+            return update(targetPath, ifMatch, principal, true, (meta, current) ->
+                    documentProposal(JsonPatch.apply(document(meta, current), patch), meta.iri()));
         }
-        return update(targetPath, ifMatch,
-                current -> sanitizeUserRelations(asObject(JsonPatch.apply(current, patch))));
+        return update(targetPath, ifMatch, principal, false, (meta, current) -> {
+            JsonObject patched = asObject(JsonPatch.apply(current, patch));
+            if (patched.keySet().stream().anyMatch("up"::equalsIgnoreCase)) {
+                throw LwsException.conflict("The up link is managed by the server and is not among the "
+                        + "relations this patch addresses; to move the resource, patch its linkset "
+                        + "document, e.g. replace /linkset/0/up/0/href");
+            }
+            return Proposal.of(patched);
+        });
     }
 
     /**
@@ -490,13 +573,14 @@ public final class LinksetService implements ResourceCleanup {
     }
 
     /**
-     * The user-managed relations of a whole linkset document, as a JSON Patch leaves it: an object
-     * whose sole member is {@code linkset}, an array of link context objects that each name this
-     * resource as their {@code anchor} (RFC 9264 section 4.2), else 422. A relation spread over
-     * several context objects is one relation; the sanitizer then drops the server-managed ones and
-     * keeps only the declarable types.
+     * What a whole linkset document, as a JSON Patch leaves it, asks for: an object whose sole member
+     * is {@code linkset}, an array of link context objects that each name this resource as their
+     * {@code anchor} (RFC 9264 section 4.2), else 422. A relation spread over several context
+     * objects is one relation; the sanitizer later drops the server-managed ones and keeps only the
+     * declarable types. The {@code up} it leaves is read before that: a document without one
+     * removes it, because the document a client patched had one.
      */
-    private static JsonObject userRelationsOf(JsonStructure document, String anchor) {
+    private static Proposal documentProposal(JsonStructure document, String anchor) {
         if (document.getValueType() != JsonValue.ValueType.OBJECT || document.asJsonObject().size() != 1
                 || !(document.asJsonObject().get("linkset") instanceof JsonArray contexts)) {
             throw new LwsException(422, "A JSON Patch must leave a linkset document: an object whose "
@@ -518,7 +602,91 @@ public final class LinksetService implements ResourceCleanup {
         }
         JsonObjectBuilder out = Json.createObjectBuilder();
         relations.forEach(out::add);
-        return sanitizeUserRelations(out.build());
+        JsonObject all = out.build();
+        List<String> up = upOf(all);
+        return new Proposal(all, up == null ? List.of() : up);
+    }
+
+    /**
+     * The {@code up} link a set of relations states, as the hrefs of its targets: {@code null} if no
+     * member names the relation, an empty list if those that do are {@code null} or empty — a
+     * removal. Relation names compare case-insensitively (RFC 8288 section 2.1.1), as everywhere
+     * else here. A value that is not an array of link target objects with an {@code href} is not a
+     * link at all (RFC 9264 section 4.2.2), and is refused rather than read as a removal.
+     */
+    private static List<String> upOf(JsonObject relations) {
+        List<String> hrefs = null;
+        for (Map.Entry<String, JsonValue> entry : relations.entrySet()) {
+            if (!entry.getKey().equalsIgnoreCase("up")) {
+                continue;
+            }
+            if (hrefs == null) {
+                hrefs = new ArrayList<>();
+            }
+            JsonValue value = entry.getValue();
+            if (value.getValueType() == JsonValue.ValueType.NULL) {
+                continue;
+            }
+            if (value.getValueType() != JsonValue.ValueType.ARRAY) {
+                throw new LwsException(422, "The up link must be an array of link target objects "
+                        + "(RFC 9264 section 4.2.2)");
+            }
+            for (JsonValue target : value.asJsonArray()) {
+                if (target.getValueType() != JsonValue.ValueType.OBJECT
+                        || !(target.asJsonObject().get("href") instanceof jakarta.json.JsonString href)) {
+                    throw new LwsException(422, "Each target of the up link must be an object with an "
+                            + "href (RFC 9264 section 4.2.2)");
+                }
+                hrefs.add(href.getString());
+            }
+        }
+        return hrefs;
+    }
+
+    /**
+     * The container a write moves its resource into, or {@code null} if it leaves the resource
+     * where it is; refuses an {@code up} no resource here can have.
+     *
+     * <p>Every resource but the storage root is in exactly one container (lws10-core, Logical
+     * Resource Organization), so a non-root resource must be left with exactly one {@code up}
+     * target and the root with none: anything else is {@code 409}. The target's {@code href} is
+     * resolved against the linkset resource's own URL first, as RFC 9264 allows a relative
+     * reference, so {@code ../archive/} and the absolute IRI name the same container. The container
+     * the resource is already in is not a move, and the write goes on as it always did; any other
+     * is handed to {@link ResourceService#move}, which decides whether it may happen.
+     */
+    private static String destinationOf(LwsResource meta, List<String> up) {
+        if (up == null) {
+            return null;
+        }
+        if (meta.parentIri() == null) {
+            if (up.isEmpty()) {
+                return null;
+            }
+            throw LwsException.conflict("The storage root is in no container, so it has no up link "
+                    + "and cannot be given one");
+        }
+        if (up.isEmpty()) {
+            throw LwsException.conflict("Every resource but the storage root is in a container, so a "
+                    + "write may not leave it without an up link");
+        }
+        if (up.size() > 1) {
+            throw LwsException.conflict("A resource is in exactly one container, so its up link has "
+                    + "exactly one target, not " + up.size());
+        }
+        String destination = resolve(Iris.linkset(meta.iri()), up.get(0));
+        return destination.equals(meta.parentIri()) ? null : destination;
+    }
+
+    /** Resolve an {@code href} against the IRI of the linkset it appears in (RFC 3986 section 5). */
+    private static String resolve(String linksetIri, String href) {
+        try {
+            URI reference = new URI(href);
+            URI absolute = reference.isAbsolute() ? reference : new URI(linksetIri).resolve(reference);
+            return absolute.normalize().toString();
+        } catch (URISyntaxException e) {
+            throw new LwsException(422, "The up link's href is not a URI reference: " + href);
+        }
     }
 
     /** Two context objects' values for one relation: arrays joined without repeats, else the later. */
@@ -607,6 +775,27 @@ public final class LinksetService implements ResourceCleanup {
         deleteUserMetadata(conn, iri);
     }
 
+    /**
+     * A moved resource keeps its user-defined metadata (lws10-core, Moving Resources), so each moved
+     * resource's row is re-keyed to its new IRI, in the move's own transaction. The stored JSON is
+     * carried over as it is: it holds no IRI of the resource's own — the anchor and the
+     * server-managed links are rendered from the registry on every read.
+     */
+    @Override
+    public void onMove(RDFConnection conn, Map<String, String> moved) {
+        moved.forEach((from, to) -> {
+            deleteUserMetadata(conn, to);
+            ParameterizedSparqlString u = new ParameterizedSparqlString();
+            u.setCommandText("DELETE { GRAPH ?g { ?from ?p ?json } } INSERT { GRAPH ?g { ?to ?p ?json } } "
+                    + "WHERE { GRAPH ?g { ?from ?p ?json } }");
+            u.setIri("g", META_GRAPH);
+            u.setIri("from", from);
+            u.setIri("to", to);
+            u.setIri("p", USER_META);
+            conn.update(u.asUpdate());
+        });
+    }
+
     // ----- internals -----
 
     /**
@@ -624,15 +813,24 @@ public final class LinksetService implements ResourceCleanup {
      * it can still fail on a bad JSON Pointer, which simply aborts the transaction.
      */
     private Linkset update(String targetPath, IfMatch ifMatch, UnaryOperator<JsonObject> mutation) {
-        return update(targetPath, ifMatch, (meta, current) -> mutation.apply(current));
+        return update(targetPath, ifMatch, null, false,
+                (meta, current) -> Proposal.of(mutation.apply(current)));
     }
 
-    /** {@link #update(String, IfMatch, UnaryOperator)} for a mutation that needs the resource itself. */
-    private Linkset update(String targetPath, IfMatch ifMatch,
-            BiFunction<LwsResource, JsonObject, JsonObject> mutation) {
+    /**
+     * {@link #update(String, IfMatch, UnaryOperator)} for a write that needs the resource itself and
+     * may state an {@code up} link: one that names another container moves the resource, inside this
+     * same transaction, authorized as {@code principal}. {@code mayMove} says whether the write can
+     * state one at all, and so whether a move has to be prepared for before the transaction opens.
+     */
+    private Linkset update(String targetPath, IfMatch ifMatch, LwsPrincipal principal, boolean mayMove,
+            BiFunction<LwsResource, JsonObject, Proposal> mutation) {
+        ResourceService.MovePreparation prepared = mayMove
+                ? prepareMove(targetPath, principal, mutation) : ResourceService.MovePreparation.NONE;
         // Told after the transaction commits, not inside it: the listener maintains a derived index
-        // and must not see a write that then rolls back.
+        // and must not see a write that then rolls back. The same goes for a move's event.
         String[] changed = new String[1];
+        ResourceEvent[] moveEvent = new ResourceEvent[1];
         Linkset result = rdf.write(conn -> {
             LwsResource meta = resources.stat(conn, targetPath)
                     .orElseThrow(() -> LwsException.notFound(targetPath));
@@ -640,10 +838,11 @@ public final class LinksetService implements ResourceCleanup {
             if (!ifMatch.matches(render(meta, current).etag())) {
                 throw LwsException.preconditionFailed("Precondition Failed");
             }
+            Proposal proposal = mutation.apply(meta, current);
             // Sanitized HERE, not at each caller. Every mutation already sanitizes its own input,
             // but this is the single point every one of them passes through, and a bound that
             // depends on five callers each remembering is a bound one new caller removes.
-            JsonObject user = sanitizeUserRelations(mutation.apply(meta, current));
+            JsonObject user = sanitizeUserRelations(proposal.user());
             // Finding N5. The request-body guard bounds one request and does not compose: a patch
             // that is itself shallow is applied to what is already stored and deepens it, so
             // repeating it grows the stored linkset without limit while every individual request
@@ -668,24 +867,70 @@ public final class LinksetService implements ResourceCleanup {
                 throw LwsException.badRequest("Stored linkset metadata would be larger than "
                         + config.linksetMaxBytes() + " bytes");
             }
-            deleteUserMetadata(conn, meta.iri());
+            // The up link it asked for, after the user-managed links are known to be storable: a
+            // move is carried out here, in this transaction, so the precondition compared above,
+            // the move and the links written below commit together or not at all.
+            String destination = destinationOf(meta, proposal.up());
+            LwsResource subject = meta;
+            if (destination != null) {
+                ResourceService.Moved moved = resources.move(conn, principal, meta, destination, prepared);
+                subject = moved.resource();
+                moveEvent[0] = moved.event();
+            }
+            deleteUserMetadata(conn, subject.iri());
             if (serialized != null) {
                 ParameterizedSparqlString u = new ParameterizedSparqlString();
                 u.setCommandText("INSERT DATA { GRAPH ?g { ?s ?p ?json } }");
                 u.setIri("g", META_GRAPH);
-                u.setIri("s", meta.iri());
+                u.setIri("s", subject.iri());
                 u.setIri("p", USER_META);
                 u.setLiteral("json", serialized);
                 conn.update(u.asUpdate());
             }
-            Linkset rendered = render(meta, user);
-            changed[0] = meta.iri();
-            return rendered;
+            Linkset rendered = render(subject, user);
+            changed[0] = subject.iri();
+            return destination == null ? rendered
+                    : new Linkset(rendered.json(), rendered.etag(), subject.iri());
         });
+        if (moveEvent[0] != null) {
+            resources.announce(moveEvent[0]);
+        }
         if (changed[0] != null) {
             metadataListener.accept(changed[0]);
         }
         return result;
+    }
+
+    /**
+     * Learn, outside any transaction, whether this write will move its resource, and if so prepare
+     * the move: warm every authorization it will make and capture who may be told (see
+     * {@link ResourceService#prepareMove}). The mutation is pure, so applying it to a snapshot here
+     * and again inside the transaction costs CPU and nothing else.
+     *
+     * <p>Advisory: whatever goes wrong here — the resource is not there, the patch does not apply,
+     * the {@code up} it asks for is refused — is raised by the write itself, in its proper place,
+     * after the precondition. A write the snapshot did not foresee as a move still moves, with its
+     * decisions made from cache alone, and tells nobody about the previous IRI (the fail-closed
+     * direction).
+     */
+    private ResourceService.MovePreparation prepareMove(String targetPath, LwsPrincipal principal,
+            BiFunction<LwsResource, JsonObject, Proposal> mutation) {
+        String[] planned;
+        try {
+            planned = rdf.read(conn -> {
+                LwsResource meta = resources.stat(conn, targetPath).orElse(null);
+                if (meta == null || !config.movable(meta.isContainer())) {
+                    return null;
+                }
+                String destination = destinationOf(meta,
+                        mutation.apply(meta, readUserMetadata(conn, meta.iri())).up());
+                return destination == null ? null : new String[] {meta.iri(), destination};
+            });
+        } catch (RuntimeException e) {
+            return ResourceService.MovePreparation.NONE;
+        }
+        return planned == null ? ResourceService.MovePreparation.NONE
+                : resources.prepareMove(principal, planned[0], planned[1]);
     }
 
     /** The rendered linkset document and its entity-tag. */

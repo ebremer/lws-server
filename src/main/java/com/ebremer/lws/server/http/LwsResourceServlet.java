@@ -100,7 +100,7 @@ public final class LwsResourceServlet extends HttpServlet {
             }
         } catch (LwsException e) {
             if (e.status() == 401) {
-                HttpSupport.setUnauthorizedHeaders(resp, config);
+                HttpSupport.setUnauthorizedHeaders(req, resp, config);
             }
             // Allow lists the methods the target supports, so it is right for a state conflict
             // ("not a container", "container is not empty") but wrong for a reserved name, where
@@ -111,7 +111,7 @@ public final class LwsResourceServlet extends HttpServlet {
                 // 15.1). Without this a shared cache could serve one client's view to another.
                 HttpSupport.setPrivateNoStore(resp);
             }
-            sendProblem(resp, e.status(), e.getMessage());
+            sendProblem(resp, e.status(), e.title(), e.getMessage());
         } catch (IllegalArgumentException e) {
             sendProblem(resp, 400, e.getMessage());
         } catch (RuntimeException e) {
@@ -145,7 +145,18 @@ public final class LwsResourceServlet extends HttpServlet {
             storageDescription.serve(req, resp, writeBody);
             return;
         }
-        ReadResult rr = service.read(path, principal);
+        ReadResult rr;
+        try {
+            rr = service.read(path, principal);
+        } catch (LwsException refused) {
+            // Nothing readable here. If a resource was moved away from this IRI and the caller may
+            // read it where it went, say where (lws10-core, Moving Resources); otherwise refuse
+            // exactly as before, so the redirect is no existence oracle.
+            if (redirectIfMoved(req, resp, Iris.toIri(config.baseUri(), path), AclMode.READ, iri -> iri)) {
+                return;
+            }
+            throw refused;
+        }
         LwsResource meta = rr.meta();
         if (rr.isContainer()) {
             handleContainerRead(req, resp, meta, rr, writeBody);
@@ -186,10 +197,20 @@ public final class LwsResourceServlet extends HttpServlet {
     }
 
     /**
-     * Read a container: the canonical {@code application/lws+json} listing (paginated when the
-     * membership exceeds {@code lws.container.page-size}, with {@code first}/{@code prev}/{@code next}/
-     * {@code last} Link relations and the requested JSON {@code Content-Type} echoed), or RDF — the
-     * full listing — when an RDF type is explicitly preferred.
+     * Read a container: one page of its listing — the canonical {@code application/lws+json}
+     * document, paginated when the membership exceeds {@code lws.container.page-size} with
+     * {@code first}/{@code prev}/{@code next}/{@code last} Link relations — in the representation
+     * {@link RdfFormats#negotiateContainer} selects: that document as {@code application/lws+json},
+     * {@code application/ld+json} or {@code application/json}, or the RDF it encodes in Turtle,
+     * N-Triples, RDF/XML, TriG or N-Quads, with the LWS profile named in {@code Content-Type} when
+     * the client asked for it (lws10-core, LWS Profile and Content Negotiation).
+     *
+     * <p>The RDF used to be a model built beside the JSON, by {@code containerRepresentation}: the
+     * whole membership, unpaginated, with statements the JSON does not make (the container's
+     * {@code lws:storage} and {@code dcterms:modified}) and without the members' format, size and
+     * modified time — so not RDF isomorphic to the lws+json representation, which is what the
+     * profile now requires. It is now the same document, read as JSON-LD, and so paginated, tagged
+     * and conditional exactly as the JSON is.
      */
     private void handleContainerRead(HttpServletRequest req, HttpServletResponse resp, LwsResource meta,
             ReadResult rr, boolean writeBody) throws IOException {
@@ -201,29 +222,9 @@ public final class LwsResourceServlet extends HttpServlet {
         // bodies from the same URL under the same entity-tag. It must never be held by a shared
         // cache (and the ETag is a concurrency token for writers, not a cache validator here).
         resp.setHeader("Cache-Control", "private, no-store");
-        String accept = req.getHeader("Accept");
-
-        if (RdfFormats.prefersRdf(accept)) {
-            // RDF: the full listing, not paginated — but still one representation among several, so
-            // its tag is qualified like any other (finding M21). Without this the Turtle rendering
-            // and the lws+json one shared a tag, and a client that had read one was told 304 for the
-            // other.
-            RdfFormats.Entry fmt = RdfFormats.negotiate(accept);
-            LwsResource representation = meta.withEtag(Etags.qualify(meta.etag(), fmt.variantToken()));
-            HttpSupport.setResourceHeaders(resp, representation, config);
-            if (HttpSupport.preconditionFailed(req, meta)) {
-                throw LwsException.preconditionFailed("Precondition Failed");
-            }
-            if (HttpSupport.ifNoneMatchMatches(req, representation)
-                    || HttpSupport.ifModifiedSinceNotModified(req, representation)) {
-                resp.setStatus(HttpServletResponse.SC_NOT_MODIFIED);
-                return;
-            }
-            // Built here and not by service.read: the JSON branch below never needs it, and it used
-            // to be built for every container GET including the ones that answer 304 (finding M23).
-            writeRdf(resp, service.containerRepresentation(meta, rr.children()), fmt, req, writeBody);
-            return;
-        }
+        // Negotiated first, because the entity-tag names the representation (finding M21): the
+        // JSON family shares one token, each RDF serialization has its own.
+        RdfFormats.ContainerVariant variant = RdfFormats.negotiateContainer(req.getHeader("Accept"));
 
         List<ChildRef> all = rr.children();
         int pageSize = config.containerPageSize();
@@ -234,15 +235,15 @@ public final class LwsResourceServlet extends HttpServlet {
             throw new LwsException(404, "No such results page: " + page);
         }
         boolean paginated = pages > 1;
-        // A page is its own representation, so its ETag must differ per page — and the JSON
-        // rendering is a different representation from the Turtle one above, so the whole thing is
-        // then qualified as lws+json. The page number goes into the hashed half rather than the
-        // variant half deliberately: a page tag must NOT satisfy an If-Match on the container, since
-        // a client that read page 2 has not read the state a write would replace. `namesState`
-        // strips only the variant token, so `<state>.lwsjson` names the state and
-        // `sha16(<state>|page=2).lwsjson` does not.
+        // A page is its own representation, so its ETag must differ per page — and each variant is a
+        // different representation from the others, so the whole thing is then qualified with the
+        // variant's token. The page number goes into the hashed half rather than the variant half
+        // deliberately: a page tag must NOT satisfy an If-Match on the container, since a client
+        // that read page 2 has not read the state a write would replace. `namesState` strips only
+        // the variant token, so `<state>.lwsjson` names the state and `sha16(<state>|page=2).lwsjson`
+        // does not.
         String etag = paginated ? Etags.sha16(meta.etag() + "|page=" + page) : meta.etag();
-        LwsResource pageMeta = meta.withEtag(Etags.qualify(etag, RdfFormats.LWS_JSON_VARIANT));
+        LwsResource pageMeta = meta.withEtag(Etags.qualify(etag, variant.variantToken()));
         HttpSupport.setResourceHeaders(resp, pageMeta, config);
         if (paginated) {
             addContainerPageLinks(resp, meta.iri(), page, pages);
@@ -264,8 +265,13 @@ public final class LwsResourceServlet extends HttpServlet {
         // alongside DataResource/Container — one read for the page, not one per member request.
         Map<String, Set<String>> declared = linksets == null ? Map.of()
                 : linksets.declaredTypes(items.stream().map(ChildDesc::iri).toList());
-        byte[] body = containerJson(meta, items, total, declared).getBytes(StandardCharsets.UTF_8);
-        resp.setContentType(RdfFormats.jsonFamilyContentType(accept) + ";charset=utf-8");
+        // Built only past the 304 above, and for the RDF variants read back from this very document,
+        // after every store read has finished: the JSON-LD reading resolves the LWS context from the
+        // bundled copy, so nothing is fetched on a read path either.
+        LwsJsonContainers.Rendered rendered = LwsJsonContainers.render(variant, meta.iri(),
+                containerJson(meta, items, total, declared));
+        byte[] body = rendered.body();
+        resp.setContentType(rendered.contentType());
         addDigests(req, resp, body);
         resp.setContentLength(body.length);
         if (writeBody) {
@@ -796,6 +802,12 @@ public final class LwsResourceServlet extends HttpServlet {
         String targetIri = Iris.toIri(config.baseUri(), targetPath);
         switch (req.getMethod()) {
             case "GET", "HEAD" -> {
+                // The linkset of a moved resource moved with it, and its previous address redirects
+                // to the new one for whoever may read the resource there.
+                if (service.stat(targetPath).isEmpty()
+                        && redirectIfMoved(req, resp, targetIri, AclMode.READ, Iris::linkset)) {
+                    return;
+                }
                 requireResourceAccess(principal, targetPath, targetIri, false);
                 LinksetService.Linkset linkset = linksets.get(targetPath);
                 // A linkset is an auxiliary Storage Resource, so it links to its storage too.
@@ -846,18 +858,17 @@ public final class LwsResourceServlet extends HttpServlet {
                 IfMatch ifMatch = enforceLinksetPrecondition(req, targetPath);
                 byte[] patchBody = readVerifiedBody(req);
                 LinksetService.Linkset updated = patchType.equals(HttpSupport.JSON_PATCH)
-                        ? linksets.jsonPatch(targetPath, patchBody, ifMatch)
-                        : linksets.patch(targetPath, patchBody, ifMatch);
-                resp.setHeader("ETag", "\"" + updated.etag() + "\"");
-                resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
+                        ? linksets.jsonPatch(targetPath, patchBody, ifMatch, principal)
+                        : linksets.patch(targetPath, patchBody, ifMatch, principal);
+                answerLinksetWrite(resp, updated);
             }
             case "PUT" -> {
                 requireResourceAccess(principal, targetPath, targetIri, true);
                 requireContentType(req, "application/linkset+json");
                 IfMatch ifMatch = enforceLinksetPrecondition(req, targetPath);
-                LinksetService.Linkset updated = linksets.put(targetPath, readVerifiedBody(req), ifMatch);
-                resp.setHeader("ETag", "\"" + updated.etag() + "\"");
-                resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
+                LinksetService.Linkset updated =
+                        linksets.put(targetPath, readVerifiedBody(req), ifMatch, principal);
+                answerLinksetWrite(resp, updated);
             }
             case "OPTIONS" -> {
                 resp.setHeader("Allow", ALLOW_LINKSET);
@@ -869,6 +880,67 @@ public final class LwsResourceServlet extends HttpServlet {
                 sendProblem(resp, 405, "Method not allowed: " + req.getMethod());
             }
         }
+    }
+
+    /**
+     * Answer a write of a linkset: {@code 204} with the new entity-tag, as always, unless the write
+     * moved the resource.
+     *
+     * <p>A move gives the resource a new IRI here, because this server derives IRIs from the
+     * containment hierarchy, and lws10-core requires such a server to "respond with 200 OK and a
+     * representation of the updated linkset resource whose anchor is the new identifier of the
+     * resource", with a {@code Content-Location} carrying the linkset's own new identifier. The
+     * {@code ETag} is that representation's, so a client can make its next write conditional on it
+     * at the new address without reading it again.
+     */
+    private void answerLinksetWrite(HttpServletResponse resp, LinksetService.Linkset updated)
+            throws IOException {
+        resp.setHeader("ETag", "\"" + updated.etag() + "\"");
+        if (!updated.moved()) {
+            resp.setStatus(HttpServletResponse.SC_NO_CONTENT);
+            return;
+        }
+        byte[] body = updated.json().getBytes(StandardCharsets.UTF_8);
+        resp.setStatus(HttpServletResponse.SC_OK);
+        resp.setHeader("Content-Location", Iris.linkset(updated.movedTo()));
+        HttpSupport.addStorageLink(resp, config);
+        resp.setContentType("application/linkset+json;charset=utf-8");
+        resp.setContentLength(body.length);
+        resp.getOutputStream().write(body);
+    }
+
+    /**
+     * Answer a {@code GET} or {@code HEAD} of a previous identifier of a moved resource with
+     * {@code 301 Moved Permanently}, if the caller may be told where it went.
+     *
+     * <p>lws10-core: a server that does not preserve identifiers "SHOULD respond to subsequent
+     * requests on the previous identifiers of the resource and of its auxiliary resources with 301
+     * Moved Permanently", and its privacy considerations add that such a response "discloses the new
+     * identifier of a resource" and should get "the same access control ... as the moved resource
+     * itself". So {@link ResourceService#movedTo} answers only for a caller allowed {@code mode} on the
+     * resource where it is now, and only when nothing is stored at the previous IRI; anyone else is
+     * refused as they were before. {@code address} turns the resource's new IRI into the new address
+     * of what was asked for — itself, its linkset or its ACL.
+     *
+     * <p>Only reads redirect: every other method on a previous identifier behaves as it did. The
+     * response depends on who asked, so no shared cache may keep it, and the caller's query string
+     * goes with it so a paged listing lands on the same page.
+     */
+    private boolean redirectIfMoved(HttpServletRequest req, HttpServletResponse resp, String iri, AclMode mode,
+            java.util.function.UnaryOperator<String> address) {
+        if (!req.getMethod().equals("GET") && !req.getMethod().equals("HEAD")) {
+            return false;
+        }
+        java.util.Optional<String> target = service.movedTo(iri, AuthenticationFilter.principal(req), mode);
+        if (target.isEmpty()) {
+            return false;
+        }
+        String query = req.getQueryString();
+        resp.setStatus(HttpServletResponse.SC_MOVED_PERMANENTLY);
+        resp.setHeader("Location", address.apply(target.get()) + (query == null ? "" : "?" + query));
+        HttpSupport.setPrivateNoStore(resp);
+        resp.setContentLength(0);
+        return true;
     }
 
     /**
@@ -954,6 +1026,12 @@ public final class LwsResourceServlet extends HttpServlet {
         String targetIri = config.baseUri() + targetPath;
         switch (req.getMethod()) {
             case "GET", "HEAD" -> {
+                // An ACL moves with its resource; its previous address redirects for whoever may
+                // read the ACL where it went, which is whoever has Control of the resource there.
+                if (!Iris.isRoot(targetPath) && service.stat(targetPath).isEmpty()
+                        && redirectIfMoved(req, resp, targetIri, AclMode.CONTROL, aclService::aclIriFor)) {
+                    return;
+                }
                 requireTargetExists(principal, targetPath, targetIri);
                 requireControl(principal, targetIri);
                 // One read for the body and the tag together. Taken separately they are two
@@ -1052,12 +1130,17 @@ public final class LwsResourceServlet extends HttpServlet {
     }
 
     private void sendProblem(HttpServletResponse resp, int status, String message) throws IOException {
+        sendProblem(resp, status, null, message);
+    }
+
+    private void sendProblem(HttpServletResponse resp, int status, String title, String message)
+            throws IOException {
         if (resp.isCommitted()) {
             return;
         }
         resp.setStatus(status);
         resp.setContentType(HttpSupport.PROBLEM_JSON + ";charset=utf-8");
-        byte[] body = HttpSupport.problemJson(status, message);
+        byte[] body = HttpSupport.problemJson(status, title, message);
         resp.setContentLength(body.length);
         resp.getOutputStream().write(body);
     }

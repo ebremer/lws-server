@@ -87,6 +87,10 @@ public final class LwsConfiguration {
     // Container listing pagination: a listing larger than this is split into pages.
     private final int containerPageSize;
 
+    // Moving resources between containers (lws10-core, Moving Resources): the resource types whose
+    // `up` link a client may change, in the order the MoveResource capability lists them.
+    private final List<String> moveAppliesTo;
+
     // Access Requests & Grants (lws10-core/lws-access-requests).
     private final boolean accessRequestsEnabled;
     private final String accessControllerInbox;
@@ -121,6 +125,8 @@ public final class LwsConfiguration {
     private final long oauthAccessTokenLifetimeSeconds;
     private final Set<String> oauthTrustedIssuers;
     private final boolean oauthAcceptCredentials;
+    // Whether a 401 challenge still carries the as_uri/realm the drafts before 19 October 2026 required.
+    private final boolean oauthLegacyChallenge;
 
     // Notifications: whether the envelope names the agent that made the change (lws10-core says the
     // actor SHOULD be omitted by default and MAY be configurable).
@@ -235,6 +241,10 @@ public final class LwsConfiguration {
         this.searchIndexEnabled = getBoolean(p, "lws.search-index.enabled", true);
         this.searchIndexPageSize = getInt(p, "lws.search-index.page-size", 100, 1, Integer.MAX_VALUE);
         this.containerPageSize = getInt(p, "lws.container.page-size", 1000, 1, Integer.MAX_VALUE);
+        // Read raw rather than through get(), which treats a blank value as unset: here an empty
+        // value is a deliberate answer ("nothing moves"), not a missing one.
+        String moves = p.getProperty("lws.move.applies-to");
+        this.moveAppliesTo = parseMoveAppliesTo(moves == null ? MOVE_TYPES_DEFAULT : moves);
         this.accessRequestsEnabled = getBoolean(p, "lws.access-requests.enabled", true);
         this.accessControllerInbox = get(p, "lws.access-requests.controller-inbox", "");
         this.quotaMaxBytes = getLong(p, "lws.quota.max-bytes", 0, 0, Long.MAX_VALUE);
@@ -291,6 +301,9 @@ public final class LwsConfiguration {
         }
         this.oauthTrustedIssuers = issuers;
         this.oauthAcceptCredentials = getBoolean(p, "lws.oauth.accept-authentication-credentials", true);
+        // On by default: the parameters cost a client that ignores them nothing, and clients
+        // written against the drafts of 5 October 2026 find their authorization server by them.
+        this.oauthLegacyChallenge = getBoolean(p, "lws.oauth.legacy-challenge", true);
         this.notificationsIncludeActor = getBoolean(p, "lws.notifications.include-actor", false);
         Set<String> loadHosts = new LinkedHashSet<>();
         for (String host : parseSet(get(p, "lws.sparql-update.allowed-hosts", ""))) {
@@ -419,8 +432,10 @@ public final class LwsConfiguration {
         }
         if (!oauthEnabled && oauthTrustedIssuers.isEmpty()) {
             log.warn("lws.oauth.enabled=false and lws.oauth.trusted-issuers is empty: this storage "
-                    + "names no authorization server, so its 401 challenges cannot carry the as_uri "
-                    + "lws10-core requires and no client can obtain an access token for it.{}",
+                    + "names no authorization server, so it has no protected resource metadata "
+                    + "(RFC 9728; lws10-core requires its authorization_servers to name one), its 401 "
+                    + "challenges cannot carry the resource_metadata lws10-core requires, and no "
+                    + "client can obtain an access token for it.{}",
                     oauthAcceptCredentials ? " Authentication credentials presented directly are "
                             + "still accepted (lws.oauth.accept-authentication-credentials)." : "");
         }
@@ -822,6 +837,33 @@ public final class LwsConfiguration {
                 "Invalid configuration: " + key + " must be " + expected + " (got \"" + value + "\").");
     }
 
+    /** The Storage Resource types a MoveResource capability can name, in the order it lists them. */
+    private static final List<String> MOVE_TYPES = List.of("DataResource", "Container");
+
+    private static final String MOVE_TYPES_DEFAULT = "DataResource,Container";
+
+    /**
+     * Parse {@code lws.move.applies-to}: a comma-separated subset of {@code DataResource} and
+     * {@code Container}, or empty / {@code none} for no moves at all.
+     *
+     * <p>Refused rather than ignored when it names anything else. The value decides both what the
+     * storage description promises and which {@code up} changes are carried out, and a typo that
+     * silently dropped a type would leave the two agreeing with each other and not with the operator.
+     */
+    private static List<String> parseMoveAppliesTo(String value) {
+        if (value.isBlank() || value.trim().equalsIgnoreCase("none")) {
+            return List.of();
+        }
+        Set<String> named = new LinkedHashSet<>();
+        for (String type : parseList(value)) {
+            String canonical = MOVE_TYPES.stream().filter(t -> t.equalsIgnoreCase(type)).findFirst()
+                    .orElseThrow(() -> error("lws.move.applies-to", value,
+                            "a comma-separated subset of DataResource and Container, or none"));
+            named.add(canonical);
+        }
+        return MOVE_TYPES.stream().filter(named::contains).toList();
+    }
+
     private static List<String> parseList(String csv) {
         if (csv == null || csv.isBlank()) {
             return List.of();
@@ -872,13 +914,16 @@ public final class LwsConfiguration {
 
     /**
      * The canonical URI of the storage (lws10-core, Discovery): the {@code id} of the storage
-     * description, the target of every {@code rel="https://www.w3.org/ns/lws#storage"} link, the
-     * {@code realm} of this storage's challenges and the one {@code aud} its access tokens carry.
+     * description, the target of every {@code rel="https://www.w3.org/ns/lws#storage"} link —
+     * including the one on a {@code 401}, which is where a client takes the {@code resource} of its
+     * token request from — and so the {@code aud} its access tokens carry (lws10-core,
+     * Authorization).
      *
-     * <p>It is the root container's URI, as lws10-core permits, because the realm has to logically
-     * contain every resource a client sends a token to — a URI no resource path starts with could
-     * not — and because it is the value this server's access grants and notifications have always
-     * carried as {@code storage}.
+     * <p>It is the root container's URI, as lws10-core permits, because it then contains every
+     * resource a client sends a token to — a URI no resource path starts with could not, and a
+     * client deciding which token to present for a URI has only containment to go by — and because
+     * it is the value this server's access grants and notifications have always carried as
+     * {@code storage}.
      */
     public String storageIri() {
         return storageRootIri();
@@ -941,6 +986,13 @@ public final class LwsConfiguration {
     /** Where the embedded authorization server publishes its metadata (lws10-core, RFC 8414). */
     public static final String AS_METADATA_PATH = "/.well-known/lws-configuration";
 
+    /**
+     * Where this storage publishes its OAuth 2.0 protected resource metadata (lws10-core, Protected
+     * Resource Metadata; RFC 9728 section 3). The metadata of a resource is at this path followed by
+     * the resource's own path, so the whole tree under it is served and reserved.
+     */
+    public static final String PROTECTED_RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource";
+
     public String storageDescriptionIri() {
         return baseUri + storageDescriptionPath();
     }
@@ -1001,14 +1053,44 @@ public final class LwsConfiguration {
     }
 
     /**
-     * The authorization server a {@code 401} names in its {@code as_uri}: the embedded one when it
-     * is enabled, otherwise the first trusted external one, otherwise {@code null}.
+     * The issuers of every authorization server whose access tokens this storage accepts, as its
+     * protected resource metadata lists them in {@code authorization_servers}: the embedded one
+     * first when it is enabled, because it is the one that certainly issues tokens for this storage,
+     * then the trusted external ones in configuration order, each once. Empty when there are none.
+     */
+    public List<String> authorizationServers() {
+        Set<String> servers = new LinkedHashSet<>();
+        if (oauthEnabled) {
+            servers.add(oauthIssuer());
+        }
+        servers.addAll(oauthTrustedIssuers);
+        return List.copyOf(servers);
+    }
+
+    /**
+     * The authorization server a client is pointed to first — the first of
+     * {@link #authorizationServers()} — or {@code null} when this storage names none. When it is
+     * {@code null} there is no conforming protected resource metadata, so a {@code 401} carries no
+     * {@code resource_metadata} (and, with {@link #oauthLegacyChallenge()}, no {@code as_uri}).
      */
     public String primaryAuthorizationServer() {
-        if (oauthEnabled) {
-            return oauthIssuer();
-        }
-        return oauthTrustedIssuers.isEmpty() ? null : oauthTrustedIssuers.iterator().next();
+        List<String> servers = authorizationServers();
+        return servers.isEmpty() ? null : servers.get(0);
+    }
+
+    /**
+     * Whether a {@code 401} challenge also carries the {@code as_uri} and {@code realm} parameters
+     * ({@code lws.oauth.legacy-challenge}, default {@code true}).
+     *
+     * <p>The drafts of 5 October 2026 required both; those of 19 October 2026 replaced them with
+     * RFC 9728's {@code resource_metadata}, which every challenge carries regardless. lws10-core
+     * still allows "other headers and parameters", and a client written against the earlier drafts
+     * finds its authorization server by {@code as_uri}, so they are kept, after
+     * {@code resource_metadata}, until such clients are gone; {@code false} sends only what the
+     * current drafts define.
+     */
+    public boolean oauthLegacyChallenge() {
+        return oauthLegacyChallenge;
     }
 
     /**
@@ -1017,6 +1099,21 @@ public final class LwsConfiguration {
      */
     public boolean oauthAcceptCredentials() {
         return oauthAcceptCredentials;
+    }
+
+    /**
+     * The Storage Resource types whose {@code up} link a client may change, moving them between
+     * containers ({@code lws.move.applies-to}): {@code DataResource}, {@code Container}, both (the
+     * default) or neither. Exactly what the storage description's {@code MoveResource} capability
+     * advertises as its {@code appliesTo}, and empty when it advertises none.
+     */
+    public List<String> moveAppliesTo() {
+        return moveAppliesTo;
+    }
+
+    /** Whether a client may move a resource of this kind between containers. */
+    public boolean movable(boolean container) {
+        return moveAppliesTo.contains(container ? "Container" : "DataResource");
     }
 
     /** Whether a notification names the agent that made the change. */
@@ -1229,9 +1326,10 @@ public final class LwsConfiguration {
      * <p>These namespaces are reserved: the {@code .acl} and {@code .meta} suffixes, which the
      * request router diverts to the access-control and linkset handlers; the configured system
      * prefix (default {@code /.lws}); the {@code /app} and {@code /callback} trees, which the
-     * console and login filters occupy; and the {@code /.well-known/acme-challenge} and
-     * {@code /.well-known/lws-configuration} paths, where the ACME responder and the authorization
-     * server metadata are served. The rest of {@code /.well-known/} is left to the storage — a
+     * console and login filters occupy; and the {@code /.well-known/acme-challenge},
+     * {@code /.well-known/lws-configuration} and {@code /.well-known/oauth-protected-resource}
+     * paths, where the ACME responder, the authorization server metadata and the protected resource
+     * metadata are served. The rest of {@code /.well-known/} is left to the storage — a
      * {@code did:web} owner may want its {@code did.json} there.
      *
      * <p>This must be a <em>superset</em> of what the router hides. Reserving more than is shadowed
@@ -1253,7 +1351,8 @@ public final class LwsConfiguration {
                 || isUnder(p, UI_PREFIX)
                 || isUnder(p, CALLBACK_PATH)
                 || isUnder(p, ACME_CHALLENGE_PREFIX)
-                || isUnder(p, AS_METADATA_PATH);
+                || isUnder(p, AS_METADATA_PATH)
+                || isUnder(p, PROTECTED_RESOURCE_METADATA_PATH);
     }
 
     private static boolean isUnder(String path, String prefix) {

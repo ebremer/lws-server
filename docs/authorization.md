@@ -90,8 +90,8 @@ an HTTPS CID document) and be named by that identifier.
 
 ## What callers see when they may not
 
-- An **anonymous** client that lacks access gets `401` with the `as_uri`/`realm` challenge, so it can
-  discover how to authenticate.
+- An **anonymous** client that lacks access gets `401` with a challenge pointing to the protected
+  resource metadata (`resource_metadata`), so it can discover how to authenticate.
 - An **authenticated** principal without Read gets `404` for a resource that exists, the same as for
   one that does not, and the `Allow` header on `OPTIONS` and `405` stops reporting its type —
   `lws.mask-forbidden-as-not-found` (default `true`). Set it to `false` to answer `403` instead. A

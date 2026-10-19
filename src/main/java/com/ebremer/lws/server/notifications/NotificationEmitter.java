@@ -3,8 +3,10 @@ package com.ebremer.lws.server.notifications;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -38,6 +40,10 @@ import com.ebremer.lws.server.vocab.LWS;
  * omitted unless {@code lws.notifications.include-actor} is set, as the core's privacy
  * considerations advise.
  *
+ * <p>A resource moved to another container is one {@code Move} activity naming both containers
+ * ({@code origin} and {@code target}), as lws10-core asks of a server that moves resources — but
+ * only for a subscriber who may read the resource where it went. See {@link #onMove}.
+ *
  * @author Erich Bremer
  */
 public final class NotificationEmitter implements ResourceEventListener {
@@ -63,6 +69,10 @@ public final class NotificationEmitter implements ResourceEventListener {
 
     @Override
     public void onResourceEvent(ResourceEvent event) {
+        if (event.kind() == ActivityKind.MOVE) {
+            onMove(event);
+            return;
+        }
         List<Subscription> matches = subscriptions.activeMatching(event.iri());
         if (matches.isEmpty()) {
             return;
@@ -82,10 +92,60 @@ public final class NotificationEmitter implements ResourceEventListener {
     }
 
     /**
+     * Tell the subscribers of a move what they may know of it.
+     *
+     * <p>A move concerns two places, so the subscriptions are those covering the resource's previous
+     * IRI <em>or</em> its new one, each told at most once. What each is told depends on what its
+     * subscriber may read, because a move can change that in either direction without any policy
+     * being edited (lws10-core, Security Considerations, "Change of Applicable Policy"):
+     *
+     * <ul>
+     *   <li>one who may read the resource where it is now gets the {@code Move}: the resource as it
+     *       is after the move ({@code object}), the container it left ({@code origin}) and the one it
+     *       joined ({@code target});</li>
+     *   <li>one who could read it where it was — decided before the move, as for a delete, because
+     *       whatever governed the previous IRI is gone by now — but may not read it where it went
+     *       gets a {@code Delete} of the previous IRI from its container: the resource left their
+     *       view, and they must not learn where it went, which the new IRI itself would tell them;</li>
+     *   <li>anyone else is told nothing.</li>
+     * </ul>
+     */
+    private void onMove(ResourceEvent event) {
+        Map<String, Subscription> matches = new LinkedHashMap<>();
+        for (String iri : List.of(event.previousIri(), event.iri())) {
+            for (Subscription subscription : subscriptions.activeMatching(iri)) {
+                matches.putIfAbsent(subscription.id(), subscription);
+            }
+        }
+        String objectType = event.type() == ResourceType.CONTAINER ? "Container" : "DataResource";
+        byte[] move = null;
+        byte[] left = null;
+        for (Subscription subscription : matches.values()) {
+            if (asSubscriber(() -> resources.canRead(subscriberOf(subscription), event.iri()))) {
+                if (move == null) {
+                    move = buildEnvelope(event.iri(), List.of(objectType), "Move", event.target(),
+                            event.origin(), event.actorWebId(), event.when());
+                }
+                dispatcher.deliver(subscription, move, CONTENT_TYPE);
+            } else if (event.audience() != null && event.audience().contains(subscription.id())) {
+                if (left == null) {
+                    left = buildEnvelope(event.previousIri(), List.of(objectType), "Delete", null,
+                            event.origin(), event.actorWebId(), event.when());
+                }
+                dispatcher.deliver(subscription, left, CONTENT_TYPE);
+            } else {
+                log.debug("Suppressing notification of the move of {} to {} (not authorized to read)",
+                        event.previousIri(), subscription.id());
+            }
+        }
+    }
+
+    /**
      * The ids of subscriptions covering {@code iri} whose subscriber may read it <em>now</em>.
      *
      * <p>Called by {@code ResourceService} before a delete transaction opens, because afterwards the
-     * resource's own ACL is gone and the question can no longer be answered honestly. See
+     * resource's own ACL is gone and the question can no longer be answered honestly; and before a
+     * move, for the same reason about the resource's previous IRI. See
      * {@link com.ebremer.lws.server.core.DeleteAudience}.
      */
     public Set<String> subscribersAllowedToKnow(String iri) {
@@ -176,8 +236,10 @@ public final class NotificationEmitter implements ResourceEventListener {
     /**
      * Build a notification envelope wrapping a single activity.
      *
-     * @param target the container the resource was added to (a {@code Create}), or {@code null}
-     * @param origin the container the resource was removed from (a {@code Delete}), or {@code null}
+     * @param target the container the resource was added to (a {@code Create} or {@code Move}), or
+     *               {@code null}
+     * @param origin the container the resource was removed from (a {@code Delete} or {@code Move}),
+     *               or {@code null}
      */
     private byte[] buildEnvelope(String objectIri, List<String> objectTypes, String activityType,
             String target, String origin, String actorWebId, Instant when) {

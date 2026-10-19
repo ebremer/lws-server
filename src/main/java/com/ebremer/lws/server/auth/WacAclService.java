@@ -1,6 +1,8 @@
 package com.ebremer.lws.server.auth;
 
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import org.apache.jena.atlas.web.HttpException;
@@ -10,6 +12,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import org.apache.jena.rdf.model.Model;
 import org.apache.jena.rdf.model.ModelFactory;
 import org.apache.jena.rdf.model.Property;
+import org.apache.jena.rdf.model.RDFNode;
 import org.apache.jena.rdf.model.Resource;
 import org.apache.jena.rdf.model.Statement;
 import org.apache.jena.vocabulary.RDF;
@@ -26,6 +29,7 @@ import com.ebremer.lws.server.core.LwsException;
 import com.ebremer.lws.server.core.LwsPrincipal;
 import com.ebremer.lws.server.core.RequestContext;
 import com.ebremer.lws.server.core.ResourceCleanup;
+import com.ebremer.lws.server.core.ResourceRelocation;
 import com.ebremer.lws.server.rdf.RdfStore;
 import com.ebremer.lws.server.vocab.ACL;
 import com.ebremer.lws.server.vocab.LWS;
@@ -52,7 +56,7 @@ import com.ebremer.lws.server.vocab.VCARD;
  *
  * @author Erich Bremer
  */
-public final class WacAclService implements Authorizer, ResourceCleanup {
+public final class WacAclService implements Authorizer, ResourceCleanup, ResourceRelocation {
 
     private static final Logger log = LoggerFactory.getLogger(WacAclService.class);
 
@@ -680,6 +684,86 @@ public final class WacAclService implements Authorizer, ResourceCleanup {
         // be the version identifier of an ACL that no longer exists, and a resource re-created at
         // this path would be handed it — the H24 resurrection, one indirection over.
         deleteAclEtag(conn, iri);
+    }
+
+    // ----- ResourceRelocation: carry a moved resource's ACL to its new IRI, in the move's own transaction -----
+
+    /**
+     * Move each moved resource's own ACL to the resource's new IRI, in the move's own transaction.
+     *
+     * <p>An ACL is an auxiliary resource whose lifetime is bound to its resource, and the draft says
+     * such resources "remain bound to it after the move". Left at the previous IRI it would govern
+     * nothing that exists — until something was created there, which would then inherit it ahead of
+     * any container's {@code acl:default} (the H24 resurrection, reached by moving rather than
+     * deleting); and the moved resource would arrive with only whatever its new container's
+     * {@code acl:default} grants.
+     *
+     * <p>The graph is re-keyed and its <em>content</em> rewritten: an IRI in it that names a moved
+     * resource or that resource's ACL, or that starts with one of those followed by {@code #}, is
+     * replaced by the corresponding new one. That is what makes {@code acl:accessTo} and
+     * {@code acl:default} name the resource where it is now — {@link #resolve} matches them against
+     * the target's IRI, so an ACL that still named the previous IRI would grant nothing — and what
+     * keeps an authorization named {@code <#owner>} (parsed against the target's IRI) and an
+     * {@code acl:agentGroup} stored inside a moved container naming things that exist. Nothing else
+     * is touched: an IRI outside the moved subtree, a blank node, a literal. The rewritten ACL is a
+     * new version, so it gets a new entity-tag. ACLs of resources that did not move are left as they
+     * are, even where they name a moved resource: they refer to identifiers, and the draft notes that
+     * a move may change who can access what.
+     */
+    @Override
+    public void onMove(RDFConnection conn, Map<String, String> moved) {
+        Map<String, String> renamed = new HashMap<>(moved);
+        moved.forEach((from, to) -> renamed.put(aclIriFor(from), aclIriFor(to)));
+        moved.forEach((from, to) -> {
+            Model acl = fetchOrEmpty(conn, aclGraphName(from));
+            // Whatever a stray graph says at the new IRI is not this resource's ACL; the moved one,
+            // or none, replaces it, as a create would have found none there.
+            deleteGraphIfAbsentIsFine(conn, aclGraphName(to));
+            deleteAclEtag(conn, to);
+            if (acl.isEmpty()) {
+                return;
+            }
+            conn.put(aclGraphName(to), relocated(acl, renamed));
+            writeAclEtag(conn, to);
+            deleteGraphIfAbsentIsFine(conn, aclGraphName(from));
+            deleteAclEtag(conn, from);
+        });
+    }
+
+    /** A copy of {@code acl} with every IRI that {@link #relocatedIri} renames renamed. */
+    private static Model relocated(Model acl, Map<String, String> renamed) {
+        Model out = ModelFactory.createDefaultModel();
+        out.setNsPrefixes(acl.getNsPrefixMap());
+        for (Statement st : acl.listStatements().toList()) {
+            out.add(relocatedNode(out, st.getSubject(), renamed).asResource(), st.getPredicate(),
+                    relocatedNode(out, st.getObject(), renamed));
+        }
+        return out;
+    }
+
+    private static RDFNode relocatedNode(Model out, RDFNode node, Map<String, String> renamed) {
+        if (!node.isURIResource()) {
+            return node; // blank nodes and literals are not addresses
+        }
+        String iri = node.asResource().getURI();
+        String to = relocatedIri(iri, renamed);
+        return to == null ? node : out.createResource(to);
+    }
+
+    /** The new IRI for {@code iri} if it names, or is a fragment of, something that moved; else null. */
+    private static String relocatedIri(String iri, Map<String, String> renamed) {
+        String to = renamed.get(iri);
+        if (to != null) {
+            return to;
+        }
+        int hash = iri.indexOf('#');
+        if (hash > 0) {
+            String base = renamed.get(iri.substring(0, hash));
+            if (base != null) {
+                return base + iri.substring(hash);
+            }
+        }
+        return null;
     }
 
     // ----- Bootstrap -----

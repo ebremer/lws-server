@@ -550,4 +550,82 @@ class WacAclServiceTest {
         assertFalse(service.allows(bob, SHARED + "doc", AclMode.WRITE));
         assertEquals(2, loader.calls);
     }
+
+    // ----- ResourceRelocation: a moved resource's ACL follows it -----
+
+    /**
+     * A moved resource's own ACL is re-keyed to its new IRI, and every IRI in it that names a moved
+     * resource, that resource's ACL, or a fragment of either, follows; nothing else changes.
+     */
+    @Test
+    void aMovedResourcesAclFollowsItAndNamesItWhereItIsNow() {
+        String from = BASE + "/old/";
+        String to = BASE + "/archive/old/";
+        Model acl = ModelFactory.createDefaultModel();
+        Resource owner = acl.createResource(from + "#owner"); // <#owner>, parsed against the target
+        owner.addProperty(RDF.type, ACL.Authorization);
+        owner.addProperty(ACL.accessTo, acl.createResource(from));
+        owner.addProperty(ACL.defaultAccess, acl.createResource(from));
+        owner.addProperty(ACL.agent, acl.createResource(ALICE));
+        owner.addProperty(ACL.mode, ACL.Control);
+        Resource team = acl.createResource(); // a blank authorization naming a group stored inside
+        team.addProperty(RDF.type, ACL.Authorization);
+        team.addProperty(ACL.accessTo, acl.createResource(from));
+        team.addProperty(ACL.agentGroup, acl.createResource(from + "groups#team"));
+        team.addProperty(ACL.agentGroup, acl.createResource(BASE + "/elsewhere#team"));
+        team.addProperty(ACL.mode, ACL.Read);
+        team.addProperty(RDF.value, acl.createResource(from + ".acl#self"));
+        wac.putSystemAclFor(from, acl);
+        String tagBefore = wac.aclEtag(from);
+
+        java.util.Map<String, String> moved = new java.util.LinkedHashMap<>();
+        moved.put(from, to);
+        moved.put(from + "groups", to + "groups");
+        store.writeDo(conn -> wac.onMove(conn, moved));
+
+        assertTrue(wac.getAclModel(from).isEmpty(), "nothing is left at the previous IRI");
+        assertTrue(wac.aclEtag(from) == null, "nor its entity-tag");
+        Model after = wac.getAclModel(to);
+        assertEquals(acl.size(), after.size(), "the same statements, renamed");
+        Resource renamed = after.getResource(to + "#owner");
+        assertTrue(renamed.hasProperty(ACL.accessTo, after.getResource(to)));
+        assertTrue(renamed.hasProperty(ACL.defaultAccess, after.getResource(to)));
+        assertTrue(renamed.hasProperty(ACL.agent, after.getResource(ALICE)), "an agent is not an address");
+        assertTrue(after.contains(null, ACL.agentGroup, after.getResource(to + "groups#team")),
+                "a group document that moved with the container is followed");
+        assertTrue(after.contains(null, ACL.agentGroup, after.getResource(BASE + "/elsewhere#team")),
+                "one that did not move is left alone");
+        assertTrue(after.contains(null, RDF.value, after.getResource(to + ".acl#self")),
+                "the ACL's own IRI follows too");
+        for (org.apache.jena.rdf.model.Statement st : after.listStatements().toList()) {
+            for (org.apache.jena.rdf.model.RDFNode node : java.util.List.of(st.getSubject(), st.getObject())) {
+                assertFalse(node.isURIResource() && node.asResource().getURI().startsWith(from)
+                        && !node.asResource().getURI().startsWith(to), "still names the previous IRI: " + st);
+            }
+        }
+        assertTrue(wac.aclEtag(to) != null && !wac.aclEtag(to).equals(tagBefore),
+                "the rewritten ACL is a new version, with a tag of its own");
+
+        // And it governs the resource where it is now, not where it was.
+        assertTrue(wac.allows(alice, to, AclMode.CONTROL));
+        assertFalse(wac.allows(bob, to, AclMode.WRITE));
+    }
+
+    /** A moved resource with no ACL of its own clears any stray graph at its new IRI. */
+    @Test
+    void aMovedResourceWithoutAnAclTakesNoStrayAclAlong() {
+        String to = BASE + "/archive/x";
+        Model stray = ModelFactory.createDefaultModel();
+        Resource a = stray.createResource();
+        a.addProperty(RDF.type, ACL.Authorization);
+        a.addProperty(ACL.accessTo, stray.createResource(to));
+        a.addProperty(ACL.agent, stray.createResource(BOB));
+        a.addProperty(ACL.mode, ACL.Write);
+        wac.putSystemAclFor(to, stray);
+
+        store.writeDo(conn -> wac.onMove(conn, java.util.Map.of(BASE + "/x", to)));
+
+        assertTrue(wac.getAclModel(to).isEmpty(), "whatever was at the new IRI was not this resource's ACL");
+        assertFalse(wac.allows(bob, to, AclMode.WRITE));
+    }
 }

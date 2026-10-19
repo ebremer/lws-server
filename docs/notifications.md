@@ -65,8 +65,17 @@ to the subscription's `inbox`:
                 "published": "2026-09-22T10:30:00.000Z" } }
 ```
 
-`type` values are arrays (`Create` / `Update` / `Delete`); `target` names the container a `Create`
-added to and `origin` the one a `Delete` removed from. The `actor` is omitted unless
+`type` values are arrays (`Create` / `Update` / `Delete` / `Move`); `target` names the container a
+`Create` added to and `origin` the one a `Delete` removed from.
+
+A [move](metadata-linksets.md#moving-a-resource) is one `Move` activity naming both — `origin` the
+container the resource left, `target` the one it joined — and its `object` is the resource where it is
+now. It reaches subscriptions to the old IRI or the new one (container topics being recursive, a
+subscriber of a container that holds either side hears it), each once: a subscriber who may read the
+resource at its new place gets the `Move`; one who could read it only at the old place, decided before
+the move as for a delete, gets a `Delete` of the old IRI with its `origin` — it left their view, and
+they are not told where it went; anyone else gets nothing. A moved container is one activity; what it
+held moves with it unannounced. The `actor` is omitted unless
 `lws.notifications.include-actor=true`, as the core's privacy considerations advise.
 
 Each delivery is signed with [RFC 9421](https://www.rfc-editor.org/rfc/rfc9421) HTTP Message

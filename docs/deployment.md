@@ -67,13 +67,14 @@ lws.behind-proxy=true
 lws.require-https=true
 ```
 
-Three paths go to the server, and nothing else:
+Four paths go to the server, and nothing else:
 
 | External | Internal | Why |
 |---|---|---|
 | `/lws/…` | `/…` | the storage (the proxy strips `/lws`) |
 | `/lws` | — | redirect to `/lws/`, the storage URI |
 | `/.well-known/lws-configuration/lws` | `/.well-known/lws-configuration` | the authorization server's metadata. Its issuer is `https://example.org/lws`, and [RFC 8414 §3.1](https://www.rfc-editor.org/rfc/rfc8414#section-3.1) puts the metadata of an issuer with a path *between the host and the path*, so that is where clients look |
+| `/.well-known/oauth-protected-resource/lws/…` | `/.well-known/oauth-protected-resource/…` | the protected resource metadata a `401`'s `resource_metadata` points to. [RFC 9728 §3.1](https://www.rfc-editor.org/rfc/rfc9728#section-3.1) puts it the same way, between the host and the resource's path, so the proxy strips `/lws` here too; the server rebuilds the resource URL from `lws.base-uri` and what follows |
 
 Apache (`mod_proxy`, `mod_proxy_http`, `mod_headers`), inside the `:443` virtual host:
 
@@ -85,6 +86,7 @@ RedirectMatch 301 ^/lws$ /lws/
 ProxyPass        /lws/ http://127.0.0.1:8090/ nocanon
 ProxyPassReverse /lws/ http://127.0.0.1:8090/
 ProxyPass /.well-known/lws-configuration/lws http://127.0.0.1:8090/.well-known/lws-configuration
+ProxyPass /.well-known/oauth-protected-resource/lws/ http://127.0.0.1:8090/.well-known/oauth-protected-resource/ nocanon
 ```
 
 nginx, inside the `server` block:
@@ -103,12 +105,18 @@ location = /.well-known/lws-configuration/lws {
   proxy_set_header X-Forwarded-Proto $scheme;
   proxy_set_header X-Forwarded-Host  $host;
 }
+location ^~ /.well-known/oauth-protected-resource/lws/ {
+  proxy_pass http://127.0.0.1:8090/.well-known/oauth-protected-resource/;   # strips /lws
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_set_header X-Forwarded-Host  $host;
+}
 ```
 
 Check it from outside: `curl https://example.org/lws/` returns the storage description with
 `"id": "https://example.org/lws/"`, `curl https://example.org/.well-known/lws-configuration/lws`
-returns metadata whose `issuer` is `https://example.org/lws`, and an anonymous request to a private
-resource gets `WWW-Authenticate: Bearer as_uri="https://example.org/lws", realm="https://example.org/lws/"`.
+returns metadata whose `issuer` is `https://example.org/lws`, an anonymous request to a private
+resource `https://example.org/lws/private` gets `WWW-Authenticate: Bearer resource_metadata="https://example.org/.well-known/oauth-protected-resource/lws/private", …`,
+and that URL returns `{"resource": "https://example.org/lws/private", "authorization_servers": ["https://example.org/lws"], …}`.
 
 The [management UI](management-ui.md) works under the prefix too (`https://example.org/lws/app/`):
 its redirects are moved back under `lws.base-uri`, and its session cookie is scoped to `/lws`, so

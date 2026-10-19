@@ -140,9 +140,29 @@ public final class JsonLdSecurity {
         RIOT.getContext().set(LangJSONLD11.JSONLD_OPTIONS, options);
     }
 
-    /** Contexts bundled with the server, by URL, and the classpath resource each is read from. */
+    /**
+     * Contexts bundled with the server, by URL, and the classpath resource each is read from.
+     *
+     * <p>{@code lws/v1} is the LWS vocabulary's context, which every {@code application/lws+json}
+     * document names and which lws10-core's LWS profile reads those documents with. Its URL still
+     * answers 404, so the file is the Working Group's CI build of {@code lws10-vocab/vocabulary.yml},
+     * as published at {@code https://w3c.github.io/lws-protocol/lws10-vocab/vocabulary.context.jsonld}
+     * after w3c/lws-protocol 9a08ff6 (19 October 2026), unmodified (sha256
+     * {@code b2dda589fea8bb68cdd8f741c46f60e0f439dd303d6765a94498031b18033e50}) — the same file the
+     * Touchstone harness bundles and the Working Group checks its tabbed examples with. Replace it
+     * byte for byte when the vocabulary changes; a hand-edited copy would let this server's RDF and a
+     * client's reading of the same lws+json disagree.
+     *
+     * <p>Bundling it makes documents that name the LWS context parse where they used to be refused
+     * (the URL was never fetchable, and is not fetched now). It is {@code @protected} and scopes
+     * most terms to a type ({@code format}, {@code size} and {@code modified} exist only on a
+     * {@code DataResource}, {@code items} and {@code totalItems} only on a {@code Container}), so a
+     * document that redefines one of its terms is refused by the JSON-LD processor, as any
+     * protected-term redefinition is.
+     */
     private static final java.util.Map<String, String> BUNDLED = java.util.Map.of(
-            "https://www.w3.org/ns/cid/v1", "/contexts/cid-v1.jsonld");
+            "https://www.w3.org/ns/cid/v1", "/contexts/cid-v1.jsonld",
+            "https://www.w3.org/ns/lws/v1", "/contexts/lws-v1.jsonld");
 
     /** A bundled context, parsed, or {@code null} if {@code url} is not one. */
     private static Document bundled(URI url) throws JsonLdError {
@@ -180,7 +200,9 @@ public final class JsonLdSecurity {
             // A context this server ships is answered from the classpath, whatever the allow-list
             // says: nothing is fetched, so none of the reasons for refusing a remote context apply.
             // The CID v1 context is the one every controlled identifier document — and so every LWS
-            // storage description and subject document — starts with.
+            // storage description and subject document — starts with; the LWS v1 context is the one
+            // every application/lws+json document names, and the one a container's RDF is derived
+            // with (see LwsJsonContainers), on a read path where nothing may be fetched.
             Document bundled = bundled(url);
             if (bundled != null) {
                 return bundled;

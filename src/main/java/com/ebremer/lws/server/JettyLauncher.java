@@ -31,6 +31,7 @@ import com.ebremer.lws.server.http.BasePathRedirectFilter;
 import com.ebremer.lws.server.http.CorsFilter;
 import com.ebremer.lws.server.http.JwksServlet;
 import com.ebremer.lws.server.http.LwsResourceServlet;
+import com.ebremer.lws.server.http.ProtectedResourceMetadataServlet;
 import com.ebremer.lws.server.http.SearchIndexServlet;
 import com.ebremer.lws.server.http.StorageDescriptionServlet;
 import com.ebremer.lws.server.http.SubscriptionServlet;
@@ -338,6 +339,11 @@ public final class JettyLauncher {
                     new AuthorizationServerMetadataServlet(config, c.tokenExchange())),
                     LwsConfiguration.AS_METADATA_PATH);
         }
+        // This storage's protected resource metadata (RFC 9728), which every 401 points to. Mapped
+        // whether or not an authorization server is configured: with none it answers 404 itself,
+        // rather than leaving the path to the resource servlet.
+        context.addServlet(new ServletHolder(new ProtectedResourceMetadataServlet(config)),
+                ProtectedResourceMetadataServlet.PATH + "/*");
         context.addServlet(new ServletHolder(new SubscriptionServlet(c.subscriptionService(), config)),
                 config.subscriptionsPath());
         context.addServlet(new ServletHolder(new SubscriptionServlet(c.subscriptionService(), config)),

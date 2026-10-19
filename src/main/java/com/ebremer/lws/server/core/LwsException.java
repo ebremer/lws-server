@@ -9,19 +9,36 @@ package com.ebremer.lws.server.core;
 public class LwsException extends RuntimeException {
 
     private final int status;
+    private final String title;
 
     public LwsException(int status, String message) {
         super(message);
         this.status = status;
+        this.title = null;
     }
 
     public LwsException(int status, String message, Throwable cause) {
         super(message, cause);
         this.status = status;
+        this.title = null;
+    }
+
+    private LwsException(int status, String title, String detail) {
+        super(detail);
+        this.status = status;
+        this.title = title;
     }
 
     public int status() {
         return status;
+    }
+
+    /**
+     * A short summary of the problem for an RFC 9457 {@code title}, or {@code null} to use the
+     * status code's reason phrase, which is what almost every refusal here does.
+     */
+    public String title() {
+        return title;
     }
 
     // ----- Convenience factories for the common cases -----
@@ -36,6 +53,15 @@ public class LwsException extends RuntimeException {
 
     public static LwsException conflict(String message) {
         return new LwsException(409, message);
+    }
+
+    /**
+     * A {@code 409} whose problem detail carries a title of its own, for a refusal the
+     * specification describes with one (lws10-core's example of moving a container into one of its
+     * own descendants).
+     */
+    public static LwsException conflict(String title, String detail) {
+        return new LwsException(409, title, detail);
     }
 
     public static LwsException unsupportedMediaType(String message) {

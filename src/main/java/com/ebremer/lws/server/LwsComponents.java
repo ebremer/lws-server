@@ -150,6 +150,7 @@ public final class LwsComponents implements AutoCloseable {
         }
         this.linksetService = new LinksetService(rdfStore, resourceService, config);
         this.resourceService.addDeleteCleanup(linksetService); // drop a resource's metadata with the delete
+        this.resourceService.addRelocation(linksetService); // and carry it to the new IRI with a move
         // A grant's `type` constraint reads the types a target's metadata declares, which are
         // advertised in its Link headers alongside the structural ones.
         this.accessService.setLinksets(linksetService);
@@ -223,6 +224,7 @@ public final class LwsComponents implements AutoCloseable {
         this.resourceService.ensureStorageRoot();
         if (aclService != null) {
             resourceService.addDeleteCleanup(aclService); // drop a resource's ACL with the delete (H24)
+            resourceService.addRelocation(aclService); // and carry it to the new IRI with a move
             // Before the root ACL is bootstrapped, so that a store whose root ACL was overwritten
             // through the old client-reachable address gets it rebuilt from lws.owners here.
             LegacyAclMigration.migrate(rdfStore, config, registry);

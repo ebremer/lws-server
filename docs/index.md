@@ -23,7 +23,8 @@ fine-grained access rules) decide who may do what.
 - **[LWS Authorization](https://w3c.github.io/lws-protocol/lws10-core/#authorization)** — the OAuth 2.0
   baseline: an embedded authorization server (Token Exchange, RFC 8693; metadata at
   `/.well-known/lws-configuration`) issuing RFC 9068 access tokens for this storage, validation of
-  those tokens (and of trusted external servers'), and `as_uri`/`realm` challenges on `401`.
+  those tokens (and of trusted external servers'), and `401` challenges that point to RFC 9728 protected
+  resource metadata.
 - **Authentication** — the three current LWS suites:
   [OpenID Connect](https://w3c.github.io/lws-protocol/lws10-authn-openid/),
   [SAML 2.0](https://w3c.github.io/lws-protocol/lws10-authn-saml/), and
@@ -66,9 +67,9 @@ fine-grained access rules) decide who may do what.
 - **[Deployment & TLS](deployment.md)** — behind a reverse proxy (at the root or under a path), or with built-in Let's Encrypt.
 - **[Security](security.md)** — the consolidated security model and its limits.
 
-> **Specification baseline.** The server follows the LWS editor's drafts as of **21 September 2026**
-> (`w3c/lws-protocol` @ `3ddc642`), re-checked against the specifications of **28 September 2026**,
-> which made no normative change. [COMPLIANCE.md](https://github.com/ebremer/lws-server/blob/master/COMPLIANCE.md)
+> **Specification baseline.** The server follows the LWS drafts of **19 October 2026**
+> (`w3c/lws-protocol` @ `9a08ff6`, the core Working Draft published that day: RFC 9728 discovery, the
+> LWS profile, moving resources); before it, those of 5 October and 21 September 2026. [COMPLIANCE.md](https://github.com/ebremer/lws-server/blob/master/COMPLIANCE.md)
 > in the repository records what changed since the previous baseline and where the server departs
 > from the drafts, deliberately. Where the drafts are still silent the implementation follows the
 > LDP / Solid conventions it derives from (trailing-slash containers, `Link: rel="type"` interaction

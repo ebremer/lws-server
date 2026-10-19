@@ -19,7 +19,9 @@ The linkset merges:
 
 - **Server-managed links** — `up` (parent container), `linkset` (self) and
   `https://www.w3.org/ns/lws#storage` (the storage URI) — generated on every read. A client
-  **cannot** set or override these.
+  **cannot** set or override these, with one exception: changing `up` asks the server to
+  [move the resource](#moving-a-resource) to another container, which it either does or refuses —
+  it is never silently ignored.
 - **`type`** is shared: the server always emits the structural type (`lws:Container` /
   `lws:DataResource`) first, and a client may *add* its own types — e.g. declare that a document is a
   `schema:Person`, which is how a binary resource gets a type at all. Nothing in the LWS namespace and
@@ -112,6 +114,55 @@ Two [RFC 7240](https://www.rfc-editor.org/rfc/rfc7240) preferences tune metadata
   ```bash
   curl -H 'Prefer: include="up describedby"' http://localhost:8080/doc.meta
   ```
+
+## Moving a resource
+
+The drafts of 19 October 2026 let a client move a resource to another container by changing the `up`
+link in its linkset. The storage description says whether that is allowed, and for what, with a
+`MoveResource` capability:
+
+```json
+{ "type": "MoveResource", "appliesTo": ["DataResource", "Container"], "preservesIdentifier": false }
+```
+
+`appliesTo` is `lws.move.applies-to` (both by default; `DataResource` alone, or `none`, which removes
+the capability and refuses every `up` change with `409`). `preservesIdentifier` is `false` because
+this server's paths follow the containment hierarchy: the moved resource becomes
+`<destination><its name>`, or another free name if that one is taken.
+
+```bash
+# read the linkset and its ETag, then replace the up link's target (conditionally, as every linkset write)
+curl -si http://localhost:8080/notes/list.txt.meta
+curl -i -X PATCH http://localhost:8080/notes/list.txt.meta \
+     -H 'Content-Type: application/json-patch+json' -H 'If-Match: "<etag>"' \
+     --data '[{"op":"test","path":"/linkset/0/up/0/href","value":"http://localhost:8080/notes/"},
+              {"op":"replace","path":"/linkset/0/up/0/href","value":"http://localhost:8080/archive/"}]'
+```
+
+A move answers `200 OK` with the updated linkset (its `anchor` the new IRI), its new `ETag`, and
+`Content-Location` naming the new linkset. A merge patch or a `PUT` of the linkset whose `up` names
+another container moves the resource too; a `PUT` that leaves `up` out keeps it, and an `up` that names
+the container the resource is already in is no move at all (`204`, as any linkset write).
+
+- **What moves.** The resource and, for a container, everything in it — content, linkset metadata
+  and ACL — in one transaction with the rest of the write. Both containers' `items` and `ETag`s change.
+  IRIs in a moved ACL that name a moved resource or its ACL are rewritten to follow it; RDF content is
+  not rebased (its triples keep their IRIs).
+- **Who may.** The agent needs delete permission on the resource (for a container, on everything it
+  holds, as a recursive `DELETE` would) and create permission in the destination, besides the write
+  permission any linkset write needs. A move is never partly applied.
+- **What is refused** (`409`): no `up` left, two `up` targets, an `up` on the storage root, a
+  destination that is a data resource or belongs to another storage, a container into itself or one
+  of its descendants, a resource type `lws.move.applies-to` leaves out. A destination that does not
+  exist is refused as a create there would be. A malformed `up` is `422`.
+- **The old IRI.** `GET`/`HEAD` of the previous IRI — or of its `.meta` or `.acl` — answers
+  `301 Moved Permanently` to the new one, for a client that may read the resource there; anyone else
+  gets exactly what they got before, so the redirect reveals nothing. A resource created later at the
+  old IRI takes its place.
+- **Notifications.** One `Move` activity (`origin` the container left, `target` the one joined) for
+  subscribers who may read the resource where it went; a `Delete` of the old IRI for those who could
+  read it only where it was. See [Notifications](notifications.md).
+- **Not followed.** Access grants and subscriptions that name the old IRI are left as they are.
 
 ## PATCH formats at a glance
 

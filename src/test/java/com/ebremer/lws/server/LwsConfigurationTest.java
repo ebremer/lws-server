@@ -185,4 +185,44 @@ class LwsConfigurationTest {
         LwsConfiguration.mergeOptionalFile(p, file);
         assertEquals("https://alice.example/#me", p.getProperty("lws.owners"));
     }
+
+    // ----- lws.move.applies-to -----
+
+    @Test
+    void movesBothKindsOfResourceByDefault() {
+        LwsConfiguration c = of("https://storage.example");
+        assertEquals(List.of("DataResource", "Container"), c.moveAppliesTo());
+        assertTrue(c.movable(false));
+        assertTrue(c.movable(true));
+    }
+
+    @Test
+    void moveAppliesToNamesASubsetInTheCapabilitysOrder() {
+        LwsConfiguration c = of("https://storage.example", "lws.move.applies-to", "container, dataresource");
+        assertEquals(List.of("DataResource", "Container"), c.moveAppliesTo(), "canonical names, fixed order");
+        LwsConfiguration dataOnly = of("https://storage.example", "lws.move.applies-to", "DataResource");
+        assertEquals(List.of("DataResource"), dataOnly.moveAppliesTo());
+        assertTrue(dataOnly.movable(false));
+        assertFalse(dataOnly.movable(true));
+    }
+
+    /** Empty is an answer here, not an absence: it turns moving off, as {@code none} does. */
+    @Test
+    void anEmptyMoveAppliesToOrNoneTurnsMovingOff() {
+        for (String off : new String[] {"", "  ", "none", "NONE"}) {
+            LwsConfiguration c = of("https://storage.example", "lws.move.applies-to", off);
+            assertTrue(c.moveAppliesTo().isEmpty(), "'" + off + "'");
+            assertFalse(c.movable(false));
+            assertFalse(c.movable(true));
+        }
+    }
+
+    @Test
+    void anUnknownMoveTypeIsRefusedRatherThanIgnored() {
+        LwsConfigurationException ex = assertThrows(LwsConfigurationException.class,
+                () -> of("https://storage.example", "lws.move.applies-to", "DataResource,Containers"));
+        assertTrue(ex.getMessage().contains("lws.move.applies-to"), ex.getMessage());
+        assertThrows(LwsConfigurationException.class,
+                () -> of("https://storage.example", "lws.move.applies-to", "none,Container"));
+    }
 }

@@ -15,6 +15,7 @@ import com.ebremer.lws.server.LwsConfiguration;
 import com.ebremer.lws.server.core.LwsPrincipal;
 import com.ebremer.lws.server.core.RequestContext;
 import com.ebremer.lws.server.http.HttpSupport;
+import com.ebremer.lws.server.http.ProtectedResourceMetadataServlet;
 
 /**
  * Resource-server authentication filter. It reads the credential from the {@code Authorization}
@@ -28,7 +29,9 @@ import com.ebremer.lws.server.http.HttpSupport;
  *       verified (RFC 9449) and the access token's {@code cnf.jkt} must match the proof key;</li>
  *   <li>a valid credential exposes the {@link LwsPrincipal} as a request attribute; an invalid one
  *       yields {@code 401} with {@code WWW-Authenticate};</li>
- *   <li>no credential proceeds anonymously (authorization is enforced per-resource downstream).</li>
+ *   <li>no credential proceeds anonymously (authorization is enforced per-resource downstream);</li>
+ *   <li>a request for the protected resource metadata ({@link ProtectedResourceMetadataServlet}) is
+ *       not authenticated at all, whatever it carries: it is how a refused client recovers.</li>
  * </ul>
  *
  * <p><b>No Shiro (finding H20).</b> A valid credential used to build an Apache Shiro {@code Subject}
@@ -72,6 +75,18 @@ public final class AuthenticationFilter implements Filter {
         HttpServletRequest request = (HttpServletRequest) req;
         HttpServletResponse response = (HttpServletResponse) res;
 
+        // The protected resource metadata is what a refused client reads next, and some clients
+        // resend the token that was just refused with every request to the same origin. Validating
+        // it here would answer the metadata request with the same 401 — a challenge pointing at a
+        // document the client can then never fetch. The document is public and identical for every
+        // caller, so nothing is lost by not knowing who asked: the request goes on anonymously.
+        // Decided by the servlet the container mapped the request to, so it covers exactly the
+        // requests that servlet answers, however their URI was spelled.
+        if (ProtectedResourceMetadataServlet.PATH.equals(request.getServletPath())) {
+            chain.doFilter(req, res);
+            return;
+        }
+
         RequestContext.setOrigin(request.getHeader("Origin"));
         RequestContext.setPurposes(parsePurposes(request.getHeader("LWS-Purpose")));
         try {
@@ -88,7 +103,7 @@ public final class AuthenticationFilter implements Filter {
             // otherwise authenticate a request as nobody, and every owner and ACL comparison
             // downstream is against a WebID.
             if (principal.webId() == null) {
-                unauthorized(response, "Bearer", "the credential names no subject");
+                unauthorized(request, response, "Bearer", "the credential names no subject");
                 return;
             }
             request.setAttribute(PRINCIPAL_ATTR, principal);
@@ -146,11 +161,11 @@ public final class AuthenticationFilter implements Filter {
             // and does not parse as a JWT, so `isSenderConstrained` is a no-op for it, and an
             // operator who required DPoP meant every scheme.
             if (config.dpopRequired()) {
-                unauthorized(response, "DPoP", "this storage requires DPoP-bound access tokens");
+                unauthorized(request, response, "DPoP", "this storage requires DPoP-bound access tokens");
                 return null;
             }
             if (DpopValidator.isSenderConstrained(value)) {
-                unauthorized(response, "DPoP",
+                unauthorized(request, response, "DPoP",
                         "this access token is DPoP-bound and must be presented with the DPoP scheme and a proof");
                 return null;
             }
@@ -158,12 +173,12 @@ public final class AuthenticationFilter implements Filter {
             // JWT is not a request any real client makes; letting it through is what made the two
             // schemes interchangeable in the first place.
             if (!bearer && isJwt(value)) {
-                unauthorized(response, "SAML2", "the SAML2 scheme carries a SAML assertion, not a JWT");
+                unauthorized(request, response, "SAML2", "the SAML2 scheme carries a SAML assertion, not a JWT");
                 return null;
             }
             Optional<LwsPrincipal> validated = validator.validate(value);
             if (validated.isEmpty()) {
-                unauthorized(response, bearer ? "Bearer" : "SAML2", "invalid or expired credential");
+                unauthorized(request, response, bearer ? "Bearer" : "SAML2", "invalid or expired credential");
                 return null;
             }
             return validated.get();
@@ -187,30 +202,30 @@ public final class AuthenticationFilter implements Filter {
             String accessToken) throws IOException {
         String proof = request.getHeader("DPoP");
         if (proof == null || proof.isBlank()) {
-            unauthorized(response, "DPoP", "a DPoP proof header is required");
+            unauthorized(request, response, "DPoP", "a DPoP proof header is required");
             return null;
         }
         String htu = config.baseUri() + path(request);
         Optional<String> jkt = dpop.verifyProof(request.getMethod(), htu, proof, accessToken);
         if (jkt.isEmpty()) {
-            unauthorized(response, "DPoP", "invalid DPoP proof");
+            unauthorized(request, response, "DPoP", "invalid DPoP proof");
             return null;
         }
         if (dpop.nonceRequired() && !dpop.isNonceValid(proof)) {
-            dpopNonceChallenge(response);
+            dpopNonceChallenge(request, response);
             return null;
         }
         Optional<LwsPrincipal> validated = validator.validate(accessToken);
         if (validated.isEmpty()) {
-            unauthorized(response, "DPoP", "invalid or expired access token");
+            unauthorized(request, response, "DPoP", "invalid or expired access token");
             return null;
         }
         if (!DpopValidator.isBoundTo(accessToken, jkt.get())) {
-            unauthorized(response, "DPoP", "access token is not bound to the DPoP key");
+            unauthorized(request, response, "DPoP", "access token is not bound to the DPoP key");
             return null;
         }
         if (!dpop.claimProof(proof)) {
-            unauthorized(response, "DPoP", "this DPoP proof has already been used");
+            unauthorized(request, response, "DPoP", "this DPoP proof has already been used");
             return null;
         }
         return validated.get();
@@ -227,23 +242,25 @@ public final class AuthenticationFilter implements Filter {
     }
 
     /** Challenge the client to repeat the request with a server-issued nonce (RFC 9449 §8). */
-    private void dpopNonceChallenge(HttpServletResponse response) throws IOException {
+    private void dpopNonceChallenge(HttpServletRequest request, HttpServletResponse response)
+            throws IOException {
         response.setHeader("DPoP-Nonce", dpop.issueNonce());
-        response.setHeader("WWW-Authenticate", HttpSupport.challenge("DPoP", config, "use_dpop_nonce",
-                "a nonce is required in the DPoP proof"));
+        response.setHeader("WWW-Authenticate", HttpSupport.challenge("DPoP", config, request,
+                "use_dpop_nonce", "a nonce is required in the DPoP proof"));
         HttpSupport.addStorageLink(response, config);
         response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "use_dpop_nonce");
     }
 
     /**
      * Refuse a presented credential with {@code 401}: an {@code invalid_token} challenge in the
-     * lws10-core shape — naming the authorization server to get a token from, and the storage as
-     * realm — and the link to the storage, so the client can recover without a hardcoded URI.
+     * lws10-core shape — whose {@code resource_metadata} leads to the authorization server to get a
+     * new token from (lws10-core: a failed validation's 401 carries it and the error) — and the link
+     * to the storage the token must be asked for, so the client can recover without a hardcoded URI.
      */
-    private void unauthorized(HttpServletResponse response, String scheme, String description)
-            throws IOException {
+    private void unauthorized(HttpServletRequest request, HttpServletResponse response, String scheme,
+            String description) throws IOException {
         response.setHeader("WWW-Authenticate",
-                HttpSupport.challenge(scheme, config, "invalid_token", description));
+                HttpSupport.challenge(scheme, config, request, "invalid_token", description));
         HttpSupport.addStorageLink(response, config);
         response.sendError(HttpServletResponse.SC_UNAUTHORIZED, description);
     }

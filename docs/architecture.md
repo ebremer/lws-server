@@ -102,7 +102,8 @@ bookkeeping never mixes in.
    see [Authentication](authentication.md) — and exposes it as a request attribute, with a
    thread-local `RequestContext` carrying the request `Origin` and any declared `LWS-Purpose`. It
    identifies the caller but does not authorize; a missing credential proceeds anonymously, an
-   invalid one is answered `401` with the `as_uri`/`realm` challenge.
+   invalid one is answered `401` with a challenge whose `resource_metadata` points to the RFC 9728
+   protected resource metadata of the URL requested.
 3. The matching **servlet** handles the method: `LwsResourceServlet` for the resource space (the
    storage URI `/` answers with the storage description unless a container representation is asked
    for), plus dedicated servlets for the storage description, the token endpoint and its RFC 8414

@@ -9,12 +9,14 @@ published by GitHub Pages from this repository).
 
 It implements:
 
-- **[LWS Core](https://w3c.github.io/lws-protocol/lws10-core/)** — the resource/containment model and CRUD operations.
+- **[LWS Core](https://w3c.github.io/lws-protocol/lws10-core/)** — the resource/containment model and CRUD operations,
+  including moving resources between containers by their `up` link, and container representations in the LWS profile.
 - **[LWS Vocabulary](https://w3c.github.io/lws-protocol/lws10-vocab/)** — the `https://www.w3.org/ns/lws#` terms.
 - **[LWS Authorization](https://w3c.github.io/lws-protocol/lws10-core/#authorization)** — the OAuth 2.0
   baseline: an embedded authorization server (Token Exchange, RFC 8693; metadata at
   `/.well-known/lws-configuration`) issuing RFC 9068 access tokens for this storage, the storage's
-  validation of those tokens (and of trusted external servers'), and `as_uri`/`realm` challenges.
+  validation of those tokens (and of trusted external servers'), and challenges that point to RFC 9728
+  protected resource metadata (`/.well-known/oauth-protected-resource`).
 - **Authentication suites** — the three current LWS suites:
   [OpenID Connect](https://w3c.github.io/lws-protocol/lws10-authn-openid/),
   [SAML 2.0](https://w3c.github.io/lws-protocol/lws10-authn-saml/), and
@@ -28,10 +30,11 @@ It implements:
 - **[LWS Search & Type Index](https://w3c.github.io/lws-protocol/lws10-index/)** — the `TypeIndexService` and the `QUERY`-based `TypeSearchService` (authorization-filtered).
 - **[Access Requests & Grants](https://w3c.github.io/lws-protocol/lws10-core/#access-requests-and-grants)** — ODRL-based `AccessRequestService`/`AccessGrantService`; grants are enforced and revocable.
 
-> **Specification baseline:** the LWS editor's drafts as of **21 September 2026**
-> (`w3c/lws-protocol` @ `3ddc642`), re-checked against the specifications of **28 September 2026**
-> (`9b03b32`; no normative change). See [COMPLIANCE.md](COMPLIANCE.md) for what changed since the
-> previous baseline and where this server departs from the drafts, deliberately. Where the drafts
+> **Specification baseline:** the LWS drafts of **19 October 2026** (`w3c/lws-protocol` @ `9a08ff6`,
+> the core Working Draft published that day: RFC 9728 discovery, the LWS profile, moving resources).
+> Before it, the drafts of 5 October (`ef02548`) and 21 September 2026 (`3ddc642`). See
+> [COMPLIANCE.md](COMPLIANCE.md) for what changed since the previous baselines and where this server
+> departs from the drafts, deliberately. Where the drafts
 > are still silent this implementation follows the **LDP / Solid Protocol conventions** it derives
 > from (trailing-slash containers, `Link: rel="type"` interaction models, content negotiation,
 > conditional requests).
@@ -189,6 +192,8 @@ exception. Key settings:
 | `lws.oauth.access-token-lifetime-seconds` | `300` | Lifetime of the access tokens it issues (1–3600; never longer than the exchanged credential) |
 | `lws.oauth.trusted-issuers` | | External authorization servers whose RFC 9068 access tokens are also accepted |
 | `lws.oauth.accept-authentication-credentials` | `true` | Also accept an authentication credential presented directly (the pre-baseline behaviour) |
+| `lws.oauth.legacy-challenge` | `true` | Also put `as_uri` and `realm` in every `401` challenge, after `resource_metadata`, for clients of the drafts before 19 October 2026; `false` sends `resource_metadata` alone |
+| `lws.move.applies-to` | `DataResource,Container` | What a client may move between containers by changing its `up` link (the `MoveResource` capability's `appliesTo`); `DataResource` alone keeps containers in place, empty or `none` turns moving off (every `up` change is then `409`) |
 | `lws.notifications.include-actor` | `false` | Name the agent that made a change in notifications (lws10-core: omit by default) |
 | `lws.dpop.require-nonce` | `false` | Require a server-issued nonce in DPoP proofs (RFC 9449 §8) |
 | `lws.dpop.require` | `false` | Refuse plain `Bearer` entirely (a `cnf.jkt` token is always refused there) |
@@ -275,10 +280,13 @@ lws.listen-port=8090          # the base URI's port says nothing about where the
 lws.behind-proxy=true
 ```
 
-Route three things to the server and nothing else: `/lws/…` → `/…` (prefix stripped), a redirect from
-`/lws` to `/lws/`, and `/.well-known/lws-configuration/lws` → `/.well-known/lws-configuration` — the
+Route four things to the server and nothing else: `/lws/…` → `/…` (prefix stripped), a redirect from
+`/lws` to `/lws/`, `/.well-known/lws-configuration/lws` → `/.well-known/lws-configuration` — the
 [RFC 8414 §3.1](https://www.rfc-editor.org/rfc/rfc8414#section-3.1) metadata location for the issuer
-`https://example.org/lws`, which is where clients look. Apache:
+`https://example.org/lws`, which is where clients look — and `/.well-known/oauth-protected-resource/lws/…`
+→ `/.well-known/oauth-protected-resource/…` (prefix stripped the same way), where a `401`'s
+`resource_metadata` points: the [RFC 9728 §3.1](https://www.rfc-editor.org/rfc/rfc9728#section-3.1)
+metadata location of each resource under `https://example.org/lws/`. Apache:
 
 ```apache
 RequestHeader set X-Forwarded-Proto "https"
@@ -287,6 +295,7 @@ RedirectMatch 301 ^/lws$ /lws/
 ProxyPass        /lws/ http://127.0.0.1:8090/ nocanon
 ProxyPassReverse /lws/ http://127.0.0.1:8090/
 ProxyPass /.well-known/lws-configuration/lws http://127.0.0.1:8090/.well-known/lws-configuration
+ProxyPass /.well-known/oauth-protected-resource/lws/ http://127.0.0.1:8090/.well-known/oauth-protected-resource/ nocanon
 ```
 
 The management console works under the prefix (`/lws/app/`): its redirects are moved back under
@@ -367,16 +376,18 @@ restart, and the credential authenticates you as that owner.
 | Method | Target | Behaviour |
 |---|---|---|
 | `GET`/`HEAD` | data resource | Content-negotiated representation (Turtle, JSON-LD, N-Triples, RDF/XML); binary streamed as-is, with byte-range support (`206`/`416`, `Accept-Ranges: bytes`) |
-| `GET`/`HEAD` | `/` (the storage URI) | The **storage description** (`application/lws+cid`) unless the client asks for a container representation — `application/lws+json`, `application/ld+json`, `application/json` or an RDF type — in which case the root container listing below |
-| `GET`/`HEAD` | container | `application/lws+json` listing (`id`/`type`/`totalItems`/`items[]` with `id`/`type`/`format`/`size`/`modified`, `type` naming any declared types after `DataResource`/`Container`); content-negotiable as `application/ld+json`/`application/json` (the requested `Content-Type` is echoed) or RDF; paginated (`?page=N`, `Link` rel=`first`/`prev`/`next`/`last`) above `lws.container.page-size` |
+| `GET`/`HEAD` | `/` (the storage URI) | The **storage description** (`application/lws+cid`) unless the client asks for a container representation — `application/lws+json`, `application/ld+json`, `application/json` or an RDF type, with or without the LWS profile — in which case the root container listing below |
+| `GET`/`HEAD` | container | `application/lws+json` listing (`id`/`type`/`totalItems`/`items[]` with `id`/`type`/`format`/`size`/`modified`, `type` naming any declared types after `DataResource`/`Container`); also as `application/ld+json`/`application/json` (the same body, the requested `Content-Type` echoed) or as RDF — Turtle, N-Triples, RDF/XML, TriG, N-Quads — read from that same document, so RDF isomorphic to it, with `profile="https://www.w3.org/ns/lws/v1"` in `Content-Type` when the client asked for the LWS profile; paginated (`?page=N`, `Link` rel=`first`/`prev`/`next`/`last`) above `lws.container.page-size`, in every representation |
 | `POST` | a container | Create a contained resource; `Slug` names it, `Link: rel="type"` picks container/RDF/non-RDF; `201` + `Location`. A reserved name is refused with `409` — see [Reserved names](#reserved-names) |
 | `PUT` | any IRI | Create (new) or replace (existing) at that exact IRI; replacing MUST be conditional. A reserved path is refused with `409`; an existing container with `409` (its representation is its membership); a `Link: rel="type"` that contradicts the IRI's own shape with `400` |
 | `PATCH` | RDF or JSON resource | RDF: `application/sparql-update`; JSON & linkset: `application/json-patch+json` (RFC 6902, the format lws10-core requires) or `application/merge-patch+json` (RFC 7396) |
 | `DELETE` | any resource | Delete (non-empty container → `409`, or recursive with `Depth: infinity`); removes the resource's metadata too |
-| `GET`/`HEAD`/`PATCH`/`PUT`/`OPTIONS` | `<resource>.meta` | The resource's linkset (metadata) resource — see [Metadata](#metadata-linkset) |
+| `GET`/`HEAD`/`PATCH`/`PUT`/`OPTIONS` | `<resource>.meta` | The resource's linkset (metadata) resource — see [Metadata](#metadata-linkset); changing its `up` link moves the resource — see [Moving resources](#moving-resources) |
+| `GET`/`HEAD` | a resource's previous IRI (or its `.meta`/`.acl`) | `301` to where it was moved, for a client that may read it there; otherwise what it answered before |
 | `OPTIONS` | any | `Allow`, `Accept-Post`, `Accept-Patch`, `Want-Content-Digest` |
 | `POST` | `<system-prefix>/token` | OAuth 2.0 Token Exchange (RFC 8693) at the embedded authorization server — see [Authentication](#authentication) |
 | `GET` | `/.well-known/lws-configuration` | The embedded authorization server's metadata (RFC 8414) |
+| `GET`/`HEAD` | `/.well-known/oauth-protected-resource<path>` | The protected resource metadata (RFC 9728) of the resource at `<path>`, the URL a `401`'s `resource_metadata` names: `resource` (that URL), `authorization_servers`, `bearer_methods_supported`, the DPoP members; the same for every path, no authentication |
 
 <a id="reserved-names"></a>
 **Reserved names.** Four namespaces belong to the server, and no resource may be created or replaced
@@ -388,7 +399,7 @@ in them — `POST` with such a `Slug`, and `PUT` at such a path, are answered `4
 | any name ending `.meta` | the linkset (metadata) resource of its target |
 | `lws.system-prefix` (default `/.lws`) and below | the storage description, JWKS, token endpoint, subscriptions, type index, access requests/grants |
 | `/app` and `/callback` and below | the management console and the OIDC login callback |
-| `/.well-known/lws-configuration` and `/.well-known/acme-challenge` and below | the authorization server metadata and the ACME HTTP-01 responder |
+| `/.well-known/lws-configuration`, `/.well-known/oauth-protected-resource` and `/.well-known/acme-challenge` and below | the authorization server metadata, the protected resource metadata and the ACME HTTP-01 responder |
 
 The request router already sends all of these elsewhere, so a resource created at one of those names was
 unreachable by every HTTP method — and, before this was enforced, `POST` with `Slug: .acl` wrote the
@@ -406,7 +417,9 @@ deliberately does *not* satisfy an `If-Match` on the container: a client that re
 read the state a write would replace, and treating it as though it had is the lost update the
 precondition exists to prevent. A listing that fits in one page (`lws.container.page-size`, 1000 by
 default) is not paginated and its tag names the state directly; for a larger container, take the tag
-from the RDF rendering (`Accept: text/turtle`), which is the full listing and is never paginated.
+from a `HEAD` of the container or the `ETag` of a write to it. (The RDF rendering used to be the full,
+unpaginated listing; since the LWS profile it is paginated exactly like the JSON, of which it is a
+reading.)
 
 Container listings are authorization-filtered per client and are therefore sent
 `Cache-Control: private, no-store`: the entity-tag is a concurrency token for writers, not a
@@ -453,9 +466,11 @@ container, non-root), and `rel="linkset"` (the metadata resource). `If-None-Matc
 refused with `428 Precondition Required`; a write exceeding `lws.quota.max-bytes` is refused with
 `507 Insufficient Storage`. Errors are returned as `application/problem+json` (RFC 9457).
 
-A `401` carries the lws10-core challenge — `WWW-Authenticate: Bearer as_uri="<authorization server>",
-realm="<storage URI>"` (and the same for `DPoP`, with its `algs`) — and the link to the storage, so a
-client learns where to get an access token and what to ask for without a hardcoded URI.
+A `401` carries the lws10-core challenge — `WWW-Authenticate: Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource<path>"`
+(RFC 9728; the same for `DPoP`, with its `algs`), followed by `as_uri` and `realm` for clients of the
+earlier drafts unless `lws.oauth.legacy-challenge=false` — and the link to the storage. The metadata
+names the authorization servers, and the storage link is the `resource` to ask a token for, so a client
+gets an access token without a hardcoded URI.
 
 **The storage description** is a W3C controlled identifier document (lws10-core, Storage Description
 Resource), served as `application/lws+cid` at the storage URI — this server's root URI, `/` — and at
@@ -465,8 +480,9 @@ root container) and the notification, search, access and SPARQL services, publis
 signing key as a `JsonWebKey` verification method referenced from `authentication`, and carries the
 capabilities. Each `capability` is a **structured object** (`{type, …}`): the implemented
 specifications (type only), a `PatchSupport` entry mapping each target format to its accepted PATCH
-formats, one `ContentNegotiation` entry per RDF serialisation, and an RFC 9530 digest entry listing the
-supported algorithms. `application/ld+json`, `application/json` and RDF are available via content
+formats, one `ContentNegotiation` entry per RDF serialisation, an RFC 9530 digest entry listing the
+supported algorithms, and — unless moving is off — `{"type": "MoveResource", "appliesTo": […],
+"preservesIdentifier": false}`. `application/ld+json`, `application/json` and RDF are available via content
 negotiation.
 
 **Integrity (RFC 9530).** A request that carries a `Content-Digest` has its body verified before any
@@ -501,6 +517,45 @@ Two preferences (RFC 7240) tune metadata writes and reads:
   the listed relations on a linkset read, keeping the structural `anchor`, and echoes
   `Preference-Applied`.
 
+<a id="moving-resources"></a>
+### Moving resources
+
+A client moves a resource to another container by changing the `up` link in its linkset
+(lws10-core, Moving resources between containers). The storage description says what moves
+(`lws.move.applies-to`: data resources and containers by default) and that identifiers are **not**
+preserved: this server's paths follow the containment hierarchy, so the moved resource is
+`<destination><its name>` (another name if that one is taken).
+
+```bash
+curl -s http://localhost:8080/notes/list.txt.meta -D - -o /dev/null | grep -i etag   # ETag: "abc"
+curl -i -X PATCH http://localhost:8080/notes/list.txt.meta \
+     -H 'Content-Type: application/json-patch+json' -H 'If-Match: "abc"' \
+     --data '[{"op":"test","path":"/linkset/0/up/0/href","value":"http://localhost:8080/notes/"},
+              {"op":"replace","path":"/linkset/0/up/0/href","value":"http://localhost:8080/archive/"}]'
+#   HTTP/1.1 200 OK
+#   Content-Type: application/linkset+json
+#   Content-Location: http://localhost:8080/archive/list.txt.meta
+#   {"linkset":[{"anchor":"http://localhost:8080/archive/list.txt", "up":[{"href":"http://localhost:8080/archive/"}], ...}]}
+```
+
+- The write is conditional like every linkset write. JSON Patch on the document is the form the draft
+  defines; a merge patch or `PUT` of the linkset that names a different `up` moves the resource too,
+  and one that leaves `up` out of a `PUT` keeps it. The same container is no move (`204`).
+- The move is one transaction with the rest of the write: the resource leaves one container's `items`
+  and joins the other's, both containers get new `ETag`s, and the resource and every descendant keep
+  their content, linkset metadata and ACL (whose IRIs naming them are rewritten to follow them).
+- It needs delete permission on the resource — for a container, on everything in it, as a recursive
+  `DELETE` would — and create (append) permission in the destination, besides the write permission
+  every linkset write needs. Nothing is moved partially.
+- Refused with `409`: no `up` left, two of them, an `up` on the root, a destination that is a data
+  resource or in another storage, a container into itself or a descendant, a type
+  `lws.move.applies-to` leaves out, or any `up` change when moving is off. A destination that does not
+  exist is refused as a create there would be.
+- The previous IRI, its `.meta` and its `.acl` answer `GET`/`HEAD` with `301` to the new ones — for a
+  client that may read the resource there; anyone else gets what they got before.
+- Subscribers hear one `Move` activity (`origin` the old container, `target` the new one) if they may
+  read the resource where it went, a `Delete` of the old IRI if they could read it only where it was.
+
 ### Example
 
 ```bash
@@ -531,9 +586,12 @@ credential for an access token at an authorization server, and presents the toke
 This server embeds one (`lws.oauth.enabled`, on by default):
 
 ```bash
-# what a 401 says: where to get a token (as_uri) and what for (realm)
-curl -si http://localhost:8080/private | grep -i www-authenticate
-#   WWW-Authenticate: Bearer as_uri="http://localhost:8080", realm="http://localhost:8080/", ...
+# what a 401 says: where the metadata naming the authorization server is, and (Link) which storage to ask for
+curl -si http://localhost:8080/private | grep -iE 'www-authenticate|^link'
+#   WWW-Authenticate: Bearer resource_metadata="http://localhost:8080/.well-known/oauth-protected-resource/private", as_uri=..., realm=...
+#   Link: <http://localhost:8080/>; rel="https://www.w3.org/ns/lws#storage"
+curl -s http://localhost:8080/.well-known/oauth-protected-resource/private   # RFC 9728 metadata
+#   {"resource":"http://localhost:8080/private","authorization_servers":["http://localhost:8080"],...}
 
 curl -s http://localhost:8080/.well-known/lws-configuration     # RFC 8414 metadata
 curl -s http://localhost:8080/.lws/token \
@@ -549,12 +607,12 @@ The token endpoint validates the `subject_token` with the suite its `subject_tok
 (`…:id_token` OpenID, `…:jwt` self-signed CID, `…:saml2` SAML) — its audience must name this
 authorization server or its token endpoint — and issues an RFC 9068 JWT (`typ: at+jwt`, `ES256`, key
 at `/.lws/jwks`) with `iss` this server, `sub` and `client_id` the credential's subject and client,
-`aud` exactly the storage URI, and a lifetime of `lws.oauth.access-token-lifetime-seconds` (300 s)
+`aud` the storage URI (only that), and a lifetime of `lws.oauth.access-token-lifetime-seconds` (300 s)
 that never outlives the credential. Only this storage is a valid `resource` (`invalid_target`
 otherwise). A token request carrying a `DPoP` proof gets a DPoP-bound token (`cnf.jkt`,
 `token_type: DPoP`). The storage validates an access token's signature (the issuer's `jwks_uri`, with
 key rotation), issuer (the embedded server, or one in `lws.oauth.trusted-issuers`, whose metadata is
-read from its `/.well-known/lws-configuration`), audience (exactly one value, this storage), and
+read from its `/.well-known/lws-configuration`), audience (it must include this storage), and
 `exp`/`nbf`/`iat`, and requires `sub`, `client_id` and `jti`.
 
 **Credentials presented directly** — this server's behaviour before the baseline, and an additional
@@ -701,7 +759,9 @@ notification in the lws10-core data model to the inbox:
                 "published": "2026-09-22T10:30:00.000Z" } }
 ```
 
-`target` names the container a `Create` added to and `origin` the one a `Delete` removed from; the
+`target` names the container a `Create` added to and `origin` the one a `Delete` removed from; a
+`Move` names both, and its `object` is the resource where it now is (see
+[Moving resources](#moving-resources) for who hears a move and how); the
 `actor` is omitted unless `lws.notifications.include-actor=true`, as the core's privacy
 considerations advise. Each delivery is signed with RFC 9421 HTTP Message Signatures (covering
 `@method @scheme @authority @path content-type content-digest`, with `created` + `keyid`). The
@@ -893,7 +953,12 @@ private key, `JsonWebKey` and `Multikey`) and its `did:key` and `did:web` subjec
 The authorization framework is covered end to end by
 [`LwsAuthorizationTest`](src/test/java/com/ebremer/lws/server/LwsAuthorizationTest.java): the
 metadata, a token exchange and every token-endpoint refusal, each access-token check against a stub
-external authorization server, a storage that accepts access tokens only, and DPoP-bound tokens. The OpenID Connect suite is covered by
+external authorization server, a storage that accepts access tokens only, and DPoP-bound tokens;
+[`ProtectedResourceMetadataTest`](src/test/java/com/ebremer/lws/server/ProtectedResourceMetadataTest.java)
+pins the RFC 9728 challenge and metadata over real sockets (the `resource_metadata` of a container, a
+data resource, a query, a percent-encoded path and a base path, the document's `resource` character for
+character, the authorization servers' order, the same answer for stored, absent and private paths, and
+no challenge there even for a bad token). The OpenID Connect suite is covered by
 [`LwsOpenIdValidatorTest`](src/test/java/com/ebremer/lws/server/auth/LwsOpenIdValidatorTest.java)
 against an in-process [`MockOidcProvider`](src/test/java/com/ebremer/lws/server/auth/MockOidcProvider.java)
 (discovery + JWKS + controlled-identifier doc, minting RS256 ID tokens): a valid token from a
@@ -922,6 +987,24 @@ grammar's edge cases, page links, and the `400`/`404`/`405`/`406`/`415`/`422` er
 in owner mode with a `did:key` owner and asserts the security guarantees: an owner sees private
 types and resources while an anonymous client sees neither (cannot even learn they exist), plus the
 pagination `Link` relations and the out-of-range-page `404`.
+
+The LWS profile is covered by
+[`ContainerProfileTest`](src/test/java/com/ebremer/lws/server/ContainerProfileTest.java): a container,
+paginated or not, read as `lws+json` and as `ld+json`, Turtle, N-Triples, TriG and N-Quads with and
+without the profile parameter, each response's RDF isomorphic to the `lws+json`'s read with the bundled
+context, the profile in `Content-Type` exactly when asked for, one `ETag` per variant and page. Moving
+resources is covered by [`MoveResourceTest`](src/test/java/com/ebremer/lws/server/MoveResourceTest.java)
+over HTTP (the capability, the draft's example and its `200`/`Content-Location`, the conditional write, a
+container moving with its members' metadata and WAC ACLs, cycles and other refusals, the merge patch and
+`PUT` forms, an agent who may not create in the destination or delete what a container holds),
+[`MoveResourceServiceTest`](src/test/java/com/ebremer/lws/server/core/MoveResourceServiceTest.java)
+(moving off, data resources only, what a moved resource and subtree keep, name collisions, each
+authorization and its warm-up outside the transaction, previous IRIs pointed out only to whoever may read
+the resource now, the search index following) and
+[`MoveNotificationTest`](src/test/java/com/ebremer/lws/server/notifications/MoveNotificationTest.java)
+(one `Move` to a subscriber who may read the new place, including one subscribed to the previous IRI, a
+`Delete` to one who could read only the old, nothing to one who could read neither, a moved container as
+one activity).
 
 Access Requests & Grants are covered by
 [`AccessGrantsTest`](src/test/java/com/ebremer/lws/server/AccessGrantsTest.java): a controller's
@@ -974,8 +1057,8 @@ per-member authorization filtering of listings by
 
 The notable limitations and deliberate design choices are summarised below.
 
-- Tracks the LWS **editor's drafts** — currently those of 21 September 2026 (`w3c/lws-protocol` @
-  `3ddc642`, re-checked unchanged as of 28 September 2026); gaps are filled with LDP/Solid conventions and may change. [COMPLIANCE.md](COMPLIANCE.md)
+- Tracks the LWS **editor's drafts** — currently those of 19 October 2026 (`w3c/lws-protocol` @
+  `9a08ff6`, the core Working Draft of that day); gaps are filled with LDP/Solid conventions and may change. [COMPLIANCE.md](COMPLIANCE.md)
   lists the deliberate departures.
 - The **storage URI is the root container's URI**, as lws10-core permits, so `/` has two
   representations chosen by `Accept`: the storage description by default, the root listing for a
