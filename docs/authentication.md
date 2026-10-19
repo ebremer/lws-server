@@ -17,16 +17,28 @@ presented directly (see [below](#credentials-presented-directly)).
 
 ## Discovering where to authenticate
 
-A request that needs authentication and has none is answered `401` with a challenge naming the
-authorization server (`as_uri`) and the protection space (`realm`, the storage URI), plus the
-storage's `Link: rel="https://www.w3.org/ns/lws#storage"`:
+A request that needs authentication and has none is answered `401` with a challenge whose
+`resource_metadata` is the URL of the **protected resource metadata** ([RFC 9728](https://www.rfc-editor.org/rfc/rfc9728))
+of the URL requested, plus the storage's `Link: rel="https://www.w3.org/ns/lws#storage"`. The metadata
+names the authorization servers; the storage link is the `resource` to ask a token for:
 
 ```bash
-curl -si http://localhost:8080/private | grep -i www-authenticate
-#   WWW-Authenticate: Bearer as_uri="http://localhost:8080", realm="http://localhost:8080/"
-#   WWW-Authenticate: DPoP as_uri="http://localhost:8080", realm="http://localhost:8080/", algs="ES256 …"
+curl -si http://localhost:8080/private | grep -iE 'www-authenticate|^link'
+#   WWW-Authenticate: Bearer resource_metadata="http://localhost:8080/.well-known/oauth-protected-resource/private", as_uri="http://localhost:8080", realm="http://localhost:8080/"
+#   WWW-Authenticate: DPoP resource_metadata="…", as_uri="http://localhost:8080", realm="http://localhost:8080/", algs="ES256 …"
+#   Link: <http://localhost:8080/>; rel="https://www.w3.org/ns/lws#storage"
+curl -s http://localhost:8080/.well-known/oauth-protected-resource/private
+#   {"resource":"http://localhost:8080/private","authorization_servers":["http://localhost:8080"],
+#    "bearer_methods_supported":["header"],"dpop_signing_alg_values_supported":[…],
+#    "dpop_bound_access_tokens_required":false}
 ```
 
+The metadata is the same document for every path, stored or not, and needs no authentication; its
+`resource` is the URL requested, character for character, as a client checks it to be.
+`authorization_servers` lists the embedded server first, then `lws.oauth.trusted-issuers`. The
+`as_uri` and `realm` that follow `resource_metadata` are what the drafts before 19 October 2026
+required; they stay for clients written against those drafts until `lws.oauth.legacy-challenge=false`.
+Behind a path prefix the proxy routes the well-known path too — see [Deployment](deployment.md#under-a-path-prefix).
 When a token was presented and refused, the challenge also carries an `error`.
 
 ## Access tokens: the embedded authorization server
@@ -66,7 +78,7 @@ the `azp` claim (lws10-authn-openid). A plain client ID such as `my-app` is refu
 `invalid_request` — *"the credential names no client, or its client is not a URI"* — so register
 the client at the identity provider under a URI client ID (for example
 `https://example.org/id/lws-client`). Keycloak accepts URIs as client IDs. The issued token is an **RFC 9068 JWT** (`typ: at+jwt`, `ES256`) with `iss` this server,
-`sub` and `client_id` the credential's subject and client, `aud` exactly the storage URI, and a
+`sub` and `client_id` the credential's subject and client, `aud` the storage URI (only that), and a
 lifetime of `lws.oauth.access-token-lifetime-seconds` (default 300 s) that never outlives the
 credential. Only this storage is a valid `resource` (anything else is `invalid_target`). Errors
 follow RFC 6749 §5.2 (`error` / `error_description`, `Cache-Control: no-store`). A token request
@@ -75,7 +87,8 @@ that carries a `DPoP` proof gets a DPoP-bound token (`cnf.jkt`, `token_type: DPo
 The storage's `AccessTokenValidator` checks an access token's signature (keys from the issuer's
 `jwks_uri`, cached, with rotation), its issuer — the embedded server, or one listed in
 `lws.oauth.trusted-issuers`, whose metadata is read from `/.well-known/lws-configuration` inserted
-before the issuer's path (RFC 8414 §3.1) — its audience (exactly one value: this storage),
+before the issuer's path (RFC 8414 §3.1) — its audience (it must include this storage; other values
+may sit beside it, as the drafts of 19 October 2026 allow),
 `exp`/`nbf`/`iat`, and requires `sub`, `client_id` and `jti`.
 
 The authorization server is deliberately minimal: token exchange only (no authorization-code flow,

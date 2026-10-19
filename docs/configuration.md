@@ -67,6 +67,7 @@ The storage embeds an OAuth 2.0 authorization server, per the LWS core Authoriza
 | `lws.oauth.enabled` | `true` | Run the embedded authorization server: Token Exchange (RFC 8693) at `<system-prefix>/token`, RFC 8414 metadata at `/.well-known/lws-configuration`, signing key at `<system-prefix>/jwks`. Its issuer is `lws.base-uri`. |
 | `lws.oauth.access-token-lifetime-seconds` | `300` | Lifetime of the RFC 9068 access tokens it issues (1–3600), never longer than the exchanged credential. |
 | `lws.oauth.trusted-issuers` | | External authorization servers whose RFC 9068 access tokens are also accepted (metadata read from their `/.well-known/lws-configuration`). |
+| `lws.oauth.legacy-challenge` | `true` | Also put `as_uri` and `realm` in every `401` challenge, after `resource_metadata`, for clients of the drafts before 19 October 2026; `false` sends `resource_metadata` alone. |
 | `lws.oauth.accept-authentication-credentials` | `true` | Also accept an authentication credential presented directly as the `Authorization` token (the pre-baseline behaviour). |
 
 ## Authentication
@@ -104,6 +105,7 @@ The storage embeds an OAuth 2.0 authorization server, per the LWS core Authoriza
 | `lws.search-index.enabled` | `true` | Advertise and serve the [Type Index / Type Search](search-type-index.md) services. |
 | `lws.search-index.page-size` | `100` | Max items per Type Index / Type Search response page. |
 | `lws.container.page-size` | `1000` | Max members per container-listing page (larger listings are paginated). |
+| `lws.move.applies-to` | `DataResource,Container` | What a client may move to another container by changing its `up` link: the `appliesTo` of the `MoveResource` capability. `DataResource` alone keeps containers in place; empty or `none` turns moving off (every `up` change is then `409`). See [Metadata & Linksets](metadata-linksets.md#moving-a-resource). |
 | `lws.access-requests.enabled` | `true` | Advertise and serve the [Access Request / Access Grant](authorization.md) services. |
 | `lws.access-requests.controller-inbox` | | Inbox notified when a new access request is created. |
 

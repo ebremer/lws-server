@@ -14,16 +14,18 @@ nav_order: 5
 | Method | Target | Behaviour |
 |---|---|---|
 | `GET` / `HEAD` | data resource | Content-negotiated representation (Turtle, JSON-LD, N-Triples, RDF/XML); binary streamed as-is, with byte-range support (`206`/`416`, `Accept-Ranges: bytes`). |
-| `GET` / `HEAD` | `/` (the storage URI) | The [storage description](#discovery--the-storage-description) (`application/lws+cid`), unless the client asks for a container representation — `application/lws+json`, `application/ld+json`, `application/json` or an RDF type — in which case the root container listing below. |
-| `GET` / `HEAD` | container | `application/lws+json` listing (`id`/`type`/`totalItems`/`items[]`, each with `id`/`type`/`format`/`size`/`modified`, `type` naming any declared types after `DataResource`/`Container`); content-negotiable as `application/ld+json` / `application/json` (the requested `Content-Type` is echoed) or RDF; paginated (`?page=N`, `Link` rel `first`/`prev`/`next`/`last`) above `lws.container.page-size`. |
+| `GET` / `HEAD` | `/` (the storage URI) | The [storage description](#discovery--the-storage-description) (`application/lws+cid`), unless the client asks for a container representation — `application/lws+json`, `application/ld+json`, `application/json` or an RDF type, with or without the LWS profile — in which case the root container listing below. |
+| `GET` / `HEAD` | container | `application/lws+json` listing (`id`/`type`/`totalItems`/`items[]`, each with `id`/`type`/`format`/`size`/`modified`, `type` naming any declared types after `DataResource`/`Container`); also as `application/ld+json` / `application/json` (the same body, the requested `Content-Type` echoed) or as RDF read from that document — see [Content negotiation](#content-negotiation); paginated (`?page=N`, `Link` rel `first`/`prev`/`next`/`last`) above `lws.container.page-size`, in every representation. |
 | `POST` | a container | Create a contained resource; `Slug` names it, `Link: rel="type"` picks container/RDF/non-RDF; `201` + `Location`. A [reserved name](#reserved-names) is refused with `409`. |
 | `PUT` | any IRI | Create (new) or replace (existing) at that exact IRI; replacing MUST be conditional. The parent container must already exist (`404` otherwise; `409` if the parent is not a container). A reserved path is refused with `409`; an existing container with `409` (its representation is its membership); a `Link: rel="type"` that contradicts the IRI's own shape with `400`. |
 | `PATCH` | RDF or JSON resource | RDF: `application/sparql-update` only (JSON Merge Patch is not defined over RDF and is not accepted there); JSON & linkset: `application/json-patch+json` (RFC 6902, the format lws10-core requires) or `application/merge-patch+json` (RFC 7396). See [Metadata & Linksets](metadata-linksets.md). |
 | `DELETE` | any resource | Delete (non-empty container → `409`, or recursive with `Depth: infinity`); removes the resource's metadata too. |
-| `GET`/`HEAD`/`PATCH`/`PUT`/`OPTIONS` | `<resource>.meta` | The resource's linkset (metadata) resource — see [Metadata & Linksets](metadata-linksets.md). |
+| `GET`/`HEAD`/`PATCH`/`PUT`/`OPTIONS` | `<resource>.meta` | The resource's linkset (metadata) resource — see [Metadata & Linksets](metadata-linksets.md); changing its `up` link [moves the resource](metadata-linksets.md#moving-a-resource). |
+| `GET`/`HEAD` | a moved resource's previous IRI (or its `.meta`/`.acl`) | `301` to where it is now, for a client that may read it there; otherwise what it answered before. |
 | `OPTIONS` | any | `Allow`, `Accept-Post`, `Accept-Patch`, `Want-Content-Digest`. |
 | `POST` | `<system-prefix>/token` | OAuth 2.0 Token Exchange (RFC 8693) at the embedded authorization server — see [Authentication](authentication.md). |
 | `GET` | `/.well-known/lws-configuration` | The embedded authorization server's metadata (RFC 8414). |
+| `GET`/`HEAD` | `/.well-known/oauth-protected-resource<path>` | The protected resource metadata (RFC 9728) of the resource at `<path>`, which a `401`'s `resource_metadata` names — see [Authentication](authentication.md#discovering-where-to-authenticate). |
 | `QUERY` | `<system-prefix>/type-search` | Type Search — see [Search & Type Index](search-type-index.md). |
 
 The interaction model in `Link: rel="type"` may be given as `https://www.w3.org/ns/lws#Container`
@@ -42,7 +44,7 @@ Several namespaces belong to the server, and no resource may be created or repla
 | any name ending `.meta` | the linkset (metadata) resource of its target |
 | `lws.system-prefix` (default `/.lws`) and below | the storage description, JWKS, token endpoint, subscriptions, type index/search, access requests/grants |
 | `/app` and `/callback` and below | the management console and the OIDC login callback |
-| `/.well-known/lws-configuration` and `/.well-known/acme-challenge` and below | the authorization server metadata and the ACME HTTP-01 responder |
+| `/.well-known/lws-configuration`, `/.well-known/oauth-protected-resource` and `/.well-known/acme-challenge` and below | the authorization server metadata, the protected resource metadata and the ACME HTTP-01 responder |
 
 The match ignores case and covers the container form (`.acl/`); the name is tested exactly as sent,
 with no percent-decoding, so `x%2Eacl` is a distinct and legal name.
@@ -69,8 +71,8 @@ and the other `412`. The same holds for `PATCH`, `DELETE` and linkset writes.
 
 A container's `ETag` changes whenever its membership does, so `GET` a container and `If-Match` that
 tag on a write to it. A numbered page (`?page=N`) carries its own tag, which deliberately does *not*
-satisfy an `If-Match` on the container; for a paginated container take the tag from the RDF rendering
-(`Accept: text/turtle`), which is the full listing and never paginated. Container listings are
+satisfy an `If-Match` on the container; for a paginated container take the tag from a `HEAD` of the
+container (every representation, RDF included, is paginated the same way). Container listings are
 filtered per client and sent `Cache-Control: private, no-store`.
 
 A write that cannot be carried out is refused rather than partly performed: a `PUT`/`POST` creating
@@ -87,23 +89,40 @@ execute in this origin (`text/html`, `image/svg+xml`, `application/xhtml+xml`, X
 ## Content negotiation
 
 RDF resources are served in Turtle, JSON-LD, N-Triples, RDF/XML or TriG by `Accept`; the default is
-Turtle. Container listings default to `application/lws+json` and also satisfy `application/ld+json`
-and `application/json` (the requested type is echoed), or any RDF serialisation.
+Turtle. Container listings default to `application/lws+json` — the one representation lws10-core
+requires — and also satisfy `application/ld+json` and `application/json` with the same body (the
+requested type is echoed).
+
+A container's RDF — Turtle, N-Triples, RDF/XML, TriG, N-Quads — is that same `lws+json` page read as
+JSON-LD with the LWS context, so it says exactly what the JSON says and is paginated like it. A client
+that asks for the **LWS profile**, `Accept: text/turtle; profile="https://www.w3.org/ns/lws/v1"` (or
+any of those types, or `application/ld+json`, with that parameter), gets it with the profile echoed in
+`Content-Type`: lws10-core requires such a response to be RDF isomorphic to the `lws+json` one, which
+this is by construction. A media range naming some other profile matches nothing here. The LWS
+context (`https://www.w3.org/ns/lws/v1`, not yet published at its URL) is bundled: the copy the Working
+Group builds from its vocabulary. The subscription list and the access request and grant endpoints are
+containers and negotiate the same way; type index and type search results are not, and never claim the
+profile.
 
 ## Errors
 
 Errors are returned as `application/problem+json` ([RFC 9457](https://www.rfc-editor.org/rfc/rfc9457)).
-A `401` carries the lws10-core challenge — `WWW-Authenticate: Bearer as_uri="<authorization
-server>", realm="<storage URI>"` (and the same for `DPoP`, with its `algs`) — and the
-`rel="https://www.w3.org/ns/lws#storage"` `Link`, so a client learns where to get an access token and
-what to ask for without a hardcoded URI:
+A `401` carries the lws10-core challenge — `WWW-Authenticate: Bearer resource_metadata="<the RFC 9728
+metadata URL of the URL requested>"` (and the same for `DPoP`, with its `algs`), then `as_uri` and
+`realm` for clients of the drafts before 19 October 2026 unless `lws.oauth.legacy-challenge=false` —
+and the `rel="https://www.w3.org/ns/lws#storage"` `Link`, so a client learns where to get an access
+token (the metadata's `authorization_servers`) and what to ask for (the storage) without a hardcoded URI:
 
 ```http
 HTTP/1.1 401 Unauthorized
-WWW-Authenticate: Bearer as_uri="https://storage.example", realm="https://storage.example/"
-WWW-Authenticate: DPoP as_uri="https://storage.example", realm="https://storage.example/", algs="ES256 ES384 ES512 EdDSA RS256 RS384 RS512 PS256 PS384 PS512"
+WWW-Authenticate: Bearer resource_metadata="https://storage.example/.well-known/oauth-protected-resource/notes/", as_uri="https://storage.example", realm="https://storage.example/"
+WWW-Authenticate: DPoP resource_metadata="https://storage.example/.well-known/oauth-protected-resource/notes/", as_uri="https://storage.example", realm="https://storage.example/", algs="ES256 ES384 ES512 EdDSA RS256 RS384 RS512 PS256 PS384 PS512"
 Link: <https://storage.example/>; rel="https://www.w3.org/ns/lws#storage"
 ```
+
+A conflict that the draft gives an example for — moving a container into itself or into one of its
+descendants — keeps the draft's problem title ("Cannot move a container into one of its own
+descendants") rather than the status phrase.
 
 ## Discovery — the storage description
 

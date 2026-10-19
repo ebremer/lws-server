@@ -63,11 +63,27 @@ changed upstream since the previous baseline, and the deliberate divergences; th
   A linkset JSON Patch was applied to the stored relation map, so a patch of the `GET` document
   answered `409` (Touchstone run `4d7187f2`); it now applies to the document, and JSON Patch is
   advertised first. COMPLIANCE.md's "Re-review of 5 October 2026" has the account.
-- [ ] **D-16 · Next re-check.** `git fetch` in `w3c/lws-protocol`, then
-  `git diff --stat ef02548 origin/main` and `gh pr list --repo w3c/lws-protocol --state merged`.
-  Also re-check `lws-contrib/lws-test-suite`, which
+- [x] **D-16 · The drafts of 19 October 2026** (`9a08ff6`, published as `WD-lws10-core-20261019`; the
+  authentication suites' Working Drafts of 15 October changed wording only). Three normative changes,
+  all three found first by Touchstone run `3c0421aa` (13 MUST failures):
+  - **#256, RFC 9728 discovery:** every `401` challenge carries `resource_metadata`; new endpoint
+    `/.well-known/oauth-protected-resource<path>`; an access token's `aud` must include the storage.
+    `as_uri`/`realm` kept after it (`lws.oauth.legacy-challenge`, default on) while the feature is at
+    risk.
+  - **#253, the LWS profile:** container RDF is the `lws+json` page read as JSON-LD with the bundled
+    context (`contexts/lws-v1.jsonld`), so isomorphic, paginated and tagged like the JSON; the profile is
+    echoed in `Content-Type`.
+  - **#237, moving resources:** `MoveResource` (`lws.move.applies-to`, `preservesIdentifier: false`);
+    an `up` change in a linkset write moves the resource and its subtree in one transaction, or is
+    `409`; `200` + `Content-Location`; `301` from previous IRIs; one `Move` activity.
+  `mvn -o test` → **661 tests, 0 failures** (1 skipped off Windows). COMPLIANCE.md's "Re-review of 19 October 2026" has
+  the account; divergences 9 (bundled context), 12 (moving on by default) and 13 (identifiers not
+  preserved) are new or changed.
+- [ ] **D-17 · Next re-check.** `git fetch` in `w3c/lws-protocol`, then
+  `git diff --stat 9a08ff6 origin/main` and `gh pr list --repo w3c/lws-protocol --state merged`.
+  Watch whether protected resource metadata stays (it is at risk); if it does, consider turning
+  `lws.oauth.legacy-challenge` off by default. Also re-check `lws-contrib/lws-test-suite`, which
   cannot be run against a server that follows the Working Draft as long as it is at `b8cb134`.
-
 ---
 
 ## Resume here — state as of 2026-08-27 (late)

@@ -37,7 +37,13 @@ sent only on responses that actually went out over TLS, and only when the base U
   default, audience-bound to exactly this storage, and never outlive the credential they were
   exchanged for. The signing key is kept owner-only in `<data-dir>/keys/`. Tokens from other
   authorization servers are accepted only from `lws.oauth.trusted-issuers`. See
-  [Authentication](authentication.md).
+  [Authentication](authentication.md). An access token's `aud` must include this storage (the
+  drafts of 19 October 2026 allow other audiences beside it); the embedded server issues exactly one.
+- **Discovery** — a `401` points to RFC 9728 protected resource metadata
+  (`/.well-known/oauth-protected-resource<path>`), the same document for every path, stored or not,
+  so it is no existence oracle; its `resource` is the URL requested and its `authorization_servers` the
+  embedded server and `lws.oauth.trusted-issuers`. Clients are expected to check that it is on the
+  origin they asked (lws10-core, Discovery Validation by a Client).
 - **Credentials** — all JWT suites reject `alg: none` and enforce `exp`; every JWT credential must
   name this storage in `aud` (`lws.audience`, `lws.audience.require`), which stops replay against
   another storage; self-signed credentials are capped at `lws.token.max-lifetime-seconds`. SAML is
@@ -59,6 +65,19 @@ sent only on responses that actually went out over TLS, and only when the base U
 - **CORS is off until configured.** `lws.cors.allowed-origins` is empty by default. A preflight is
   answered with a fixed method and header set, `Access-Control-Allow-Credentials` is never sent, and
   `*` is refused at startup in open mode.
+- **Moved resources.** The `301` a previous IRI answers names the new IRI only to a client that may
+  read the resource there; anyone else gets the answer they got before the move (the core's privacy
+  considerations). A subscriber who may not follow a moved resource is told it left, not where it went.
+
+## Moving resources
+
+A move changes where a resource sits, and so, through WAC inheritance, who may read it — in either
+direction, with no ACL edited (the core's security considerations). It is therefore authorized as what
+it amounts to: a delete of the resource — of the whole subtree for a container, as a recursive
+`DELETE` — plus a create in the destination, both decided before anything changes and never partly
+applied. A resource's own ACL moves with it and keeps naming it. `lws.move.applies-to` limits what may
+move (both kinds by default; `DataResource` or `none` where moves are not wanted, as the core
+recommends describing the capability only where a deployment needs it).
 
 ## SSRF guards
 
