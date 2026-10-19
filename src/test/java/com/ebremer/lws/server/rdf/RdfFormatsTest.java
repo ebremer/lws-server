@@ -251,6 +251,188 @@ class RdfFormatsTest {
                 RdfFormats.jsonFamilyContentType("application/lws+json;q=0.1, application/ld+json;q=0.2"));
     }
 
+    // ----- containers: the LWS profile -----
+
+    private static final String LWS_PROFILE = "https://www.w3.org/ns/lws/v1";
+    private static final String IN_PROFILE = ";profile=\"" + LWS_PROFILE + "\"";
+
+    private static RdfFormats.ContainerVariant container(String accept) {
+        return RdfFormats.negotiateContainer(accept);
+    }
+
+    /**
+     * lws10-core: "Servers MUST honor requests for application/lws+json on containers". With no
+     * preference, a wildcard, or nothing this server can produce, that is the answer, and it never
+     * names a profile; ld+json and json are still served, as the same document.
+     */
+    @Test
+    void aContainerIsLwsJsonUnlessSomethingElseIsPreferred() {
+        for (String accept : new String[] {null, "", "*/*", "application/lws+json", "text/html",
+                "application/json, application/lws+json", "image/png;q=0.9, application/lws+json;q=0.5"}) {
+            RdfFormats.ContainerVariant v = container(accept);
+            assertEquals(RdfFormats.LWS_JSON, v.mediaType(), String.valueOf(accept));
+            assertFalse(v.isRdf(), String.valueOf(accept));
+            assertFalse(v.profile(), String.valueOf(accept));
+            assertEquals(RdfFormats.LWS_JSON, v.contentType());
+            assertEquals(RdfFormats.LWS_JSON_VARIANT, v.variantToken());
+        }
+        assertEquals(RdfFormats.JSONLD, container("application/ld+json").contentType());
+        assertEquals("application/json", container("application/json").contentType());
+        assertEquals(RdfFormats.TURTLE, container("text/turtle").contentType(),
+                "a client that did not ask for the profile is not told about it");
+        assertTrue(container("text/turtle").isRdf());
+    }
+
+    /** The profile is asked for with the profile parameter of an RDF media type, and named back. */
+    @Test
+    void aRangeNamingTheLwsProfileSelectsItAndIsNamedBack() {
+        RdfFormats.ContainerVariant ld = container("application/ld+json; profile=\"" + LWS_PROFILE + "\"");
+        assertEquals(RdfFormats.JSONLD, ld.mediaType());
+        assertFalse(ld.isRdf(), "application/ld+json is the lws+json document itself");
+        assertTrue(ld.profile());
+        assertEquals(RdfFormats.JSONLD + IN_PROFILE, ld.contentType());
+        assertEquals(RdfFormats.LWS_JSON_VARIANT, ld.variantToken(), "the same bytes as lws+json");
+
+        for (String mt : List.of(RdfFormats.TURTLE, RdfFormats.NTRIPLES, RdfFormats.TRIG, RdfFormats.NQUADS,
+                RdfFormats.RDFXML)) {
+            RdfFormats.ContainerVariant v = container(mt + IN_PROFILE);
+            assertEquals(mt, v.mediaType(), mt);
+            assertTrue(v.isRdf(), mt);
+            assertTrue(v.profile(), mt);
+            assertEquals(mt + IN_PROFILE, v.contentType(), mt);
+            assertEquals(v.variantToken(), container(mt).variantToken(),
+                    "naming the profile changes the Content-Type, not the bytes: " + mt);
+        }
+        assertEquals("nq", container(RdfFormats.NQUADS).variantToken());
+        assertEquals(Lang.NQUADS, container(RdfFormats.NQUADS).rdf().lang());
+    }
+
+    /** Quoted or not, in a list, and with the parameter name in any case: all ask for the profile. */
+    @Test
+    void theProfileParameterIsParsedAsRfc6906WritesIt() {
+        for (String accept : List.of(
+                "text/turtle;profile=" + LWS_PROFILE,
+                "text/turtle; profile = \"" + LWS_PROFILE + "\"",
+                "text/turtle;PROFILE=\"" + LWS_PROFILE + "\"",
+                "text/turtle;Profile=" + LWS_PROFILE,
+                "text/turtle;profile=\"https://example.org/other " + LWS_PROFILE + "\"",
+                "text/turtle;profile=\"" + LWS_PROFILE + "  https://example.org/other\"",
+                // A quoted URI may hold the separators of the header itself.
+                "text/turtle;profile=\"https://example.org/a,b;c " + LWS_PROFILE + "\"",
+                "text/turtle;profile=\"https://example.org/x\";profile=\"" + LWS_PROFILE + "\"")) {
+            RdfFormats.ContainerVariant v = container(accept);
+            assertEquals(RdfFormats.TURTLE, v.mediaType(), accept);
+            assertTrue(v.profile(), accept);
+            assertEquals(RdfFormats.TURTLE + IN_PROFILE, v.contentType(),
+                    "only the profile this representation is in is named: " + accept);
+        }
+        // A quoted comma does not split the header: the second range is still read.
+        assertEquals(RdfFormats.NTRIPLES, container("text/turtle;profile=\"https://example.org/a,b\", "
+                + RdfFormats.NTRIPLES + ";q=0.5").mediaType());
+    }
+
+    /** The quality goes with the range wherever it sits among the parameters. */
+    @Test
+    void qualityStillDecidesWithAProfileParameter() {
+        assertEquals(RdfFormats.TURTLE, container("text/turtle" + IN_PROFILE + ";q=0.5, application/lws+json;q=0.4")
+                .mediaType());
+        assertEquals(RdfFormats.TURTLE, container("text/turtle;q=0.5" + IN_PROFILE + ", application/lws+json;q=0.4")
+                .mediaType());
+        assertEquals(RdfFormats.LWS_JSON, container("application/lws+json;q=0.9, text/turtle" + IN_PROFILE + ";q=0.5")
+                .mediaType());
+        assertEquals(RdfFormats.LWS_JSON, container("text/turtle" + IN_PROFILE + ";Q=0").mediaType(),
+                "a refused profile variant is refused");
+        assertEquals(RdfFormats.NTRIPLES, container("text/turtle" + IN_PROFILE + ";q=0.4, "
+                + RdfFormats.NTRIPLES + IN_PROFILE + ";q=0.6").mediaType());
+        // Server preference breaks an RDF tie: Turtle before N-Triples, TriG before N-Quads.
+        assertEquals(RdfFormats.TURTLE, container(RdfFormats.NTRIPLES + ", text/turtle").mediaType());
+        assertEquals(RdfFormats.TRIG, container(RdfFormats.NQUADS + IN_PROFILE + ", " + RdfFormats.TRIG + IN_PROFILE)
+                .mediaType());
+    }
+
+    /**
+     * "A server MUST NOT select such a media type if it cannot produce a representation in the LWS
+     * profile in it" — and it cannot produce any other profile, so a range naming only another
+     * profile matches nothing, and a profile URI is compared exactly.
+     */
+    @Test
+    void aRangeNamingAnotherProfileMatchesNothing() {
+        assertEquals(RdfFormats.LWS_JSON, container("text/turtle;profile=\"https://example.org/other\"").mediaType());
+        assertEquals(RdfFormats.LWS_JSON, container("application/ld+json;profile=\"https://example.org/other\"")
+                .mediaType());
+        assertEquals(RdfFormats.LWS_JSON, container("text/turtle;profile=\"https://www.w3.org/ns/LWS/v1\"")
+                .mediaType());
+        assertEquals(RdfFormats.LWS_JSON, container("text/turtle;profile=\"\"").mediaType(),
+                "a profile parameter that names nothing names no profile this server produces");
+        RdfFormats.ContainerVariant v = container("text/turtle;profile=\"https://example.org/other\", "
+                + RdfFormats.NTRIPLES + ";q=0.1");
+        assertEquals(RdfFormats.NTRIPLES, v.mediaType());
+        assertFalse(v.profile(), "N-Triples was asked for without the profile");
+    }
+
+    /** The more specific range decides, and a profile parameter makes a range more specific. */
+    @Test
+    void theMostSpecificRangeDecidesWhetherTheProfileIsNamed() {
+        assertTrue(container("text/turtle, text/turtle" + IN_PROFILE).profile());
+        assertTrue(container("text/turtle;q=0.5, text/turtle" + IN_PROFILE).profile());
+        assertFalse(container("text/turtle" + IN_PROFILE + ";q=0.1, text/turtle;q=0.9").profile(),
+                "the plain range is preferred, so the plain answer is given");
+        assertFalse(container("text/turtle" + IN_PROFILE + ";q=0, text/turtle").profile());
+        assertTrue(container("text/*" + IN_PROFILE).profile());
+        assertTrue(container("text/turtle" + IN_PROFILE + ", */*;q=0.1").isRdf());
+        assertFalse(container("text/*" + IN_PROFILE + ";q=0.3, */*;q=0.8").isRdf(),
+                "the wildcard ties Turtle with the JSON family, and a tie is the JSON");
+    }
+
+    /**
+     * lws+json is the profile's own form and application/json has no parameters, so a range asking
+     * for the profile on either matches it, without naming the profile back.
+     */
+    @Test
+    void theProfileIsNamedOnlyOnRdfMediaTypes() {
+        RdfFormats.ContainerVariant lws = container("application/lws+json" + IN_PROFILE);
+        assertEquals(RdfFormats.LWS_JSON, lws.contentType());
+        RdfFormats.ContainerVariant json = container("application/json" + IN_PROFILE);
+        assertEquals("application/json", json.contentType());
+        assertEquals(RdfFormats.LWS_JSON, container("application/lws+json, application/ld+json" + IN_PROFILE)
+                .contentType(), "lws+json still wins a tie");
+    }
+
+    /**
+     * Everything that is not a container is in no profile, so the plain negotiations do not count a
+     * range carrying a profile parameter: a data resource, the storage description, a subscription
+     * and a search result never claim the profile, and are never selected by it.
+     */
+    @Test
+    void thePlainNegotiationsIgnoreRangesThatAskForAProfile() {
+        assertEquals(RdfFormats.TURTLE, negotiated(RdfFormats.NTRIPLES + IN_PROFILE),
+                "no match, so the documented fallback");
+        assertEquals(RdfFormats.NTRIPLES, negotiated(RdfFormats.NTRIPLES + IN_PROFILE + ", "
+                + RdfFormats.NTRIPLES + ";q=0.2"));
+        assertEquals(0.0, RdfFormats.quality(RdfFormats.JSONLD, RdfFormats.JSONLD + IN_PROFILE));
+        assertEquals(0.5, RdfFormats.quality(RdfFormats.JSONLD, RdfFormats.JSONLD + IN_PROFILE + ", */*;q=0.5"));
+        assertEquals(RdfFormats.LWS_JSON, RdfFormats.jsonFamilyContentType(RdfFormats.JSONLD + IN_PROFILE));
+        assertFalse(RdfFormats.prefersRdf("text/turtle" + IN_PROFILE));
+    }
+
+    /**
+     * The storage URI is also the root container's. A client naming the LWS profile is asking for a
+     * container, so it gets the container; a client naming some other profile has asked for nothing
+     * this server has, and the description still wins.
+     */
+    @Test
+    void askingForTheProfileAtTheStorageUriAsksForTheContainer() {
+        assertFalse(RdfFormats.prefersStorageDescription("text/turtle" + IN_PROFILE));
+        assertFalse(RdfFormats.prefersStorageDescription(RdfFormats.JSONLD + IN_PROFILE));
+        assertFalse(RdfFormats.prefersStorageDescription("application/lws+cid;q=0.5, text/turtle" + IN_PROFILE));
+        assertFalse(RdfFormats.prefersStorageDescription("application/lws+cid;q=0.5, " + RdfFormats.NQUADS));
+        assertTrue(RdfFormats.prefersStorageDescription("application/lws+cid, text/turtle" + IN_PROFILE + ";q=0.5"));
+        assertTrue(RdfFormats.prefersStorageDescription(
+                "application/lws+cid;q=0.5, text/turtle;profile=\"https://example.org/other\""));
+        assertTrue(RdfFormats.prefersStorageDescription(null));
+        assertTrue(RdfFormats.prefersStorageDescription("*/*"));
+    }
+
     // ----- variant tokens -----
 
     /**
@@ -261,7 +443,7 @@ class RdfFormatsTest {
      */
     @Test
     void onlyServerMintedVariantTokensAreRecognised() {
-        for (String token : List.of("ttl", "jsonld", "nt", "rdfxml", "trig", RdfFormats.LWS_JSON_VARIANT)) {
+        for (String token : List.of("ttl", "jsonld", "nt", "rdfxml", "trig", "nq", RdfFormats.LWS_JSON_VARIANT)) {
             assertTrue(RdfFormats.isVariantToken(token), token);
         }
         assertEquals("lwsjson", RdfFormats.LWS_JSON_VARIANT);
@@ -278,7 +460,7 @@ class RdfFormatsTest {
      */
     @Test
     void noVariantTokenContainsTheEtagSeparator() {
-        for (String token : List.of("ttl", "jsonld", "nt", "rdfxml", "trig", RdfFormats.LWS_JSON_VARIANT)) {
+        for (String token : List.of("ttl", "jsonld", "nt", "rdfxml", "trig", "nq", RdfFormats.LWS_JSON_VARIANT)) {
             assertFalse(token.contains("."), token);
             assertFalse(token.isBlank(), token);
         }

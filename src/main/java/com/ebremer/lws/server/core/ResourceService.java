@@ -18,16 +18,12 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import jakarta.json.JsonArray;
 import jakarta.json.JsonStructure;
 import jakarta.json.JsonValue;
-import org.apache.jena.datatypes.xsd.XSDDatatype;
 import org.apache.jena.rdf.model.Model;
 import org.apache.jena.rdf.model.ModelFactory;
-import org.apache.jena.rdf.model.Resource;
 import org.apache.jena.rdfconnection.RDFConnection;
 import org.apache.jena.riot.Lang;
 import org.apache.jena.update.UpdateAction;
 import org.apache.jena.update.UpdateRequest;
-import org.apache.jena.vocabulary.DCTerms;
-import org.apache.jena.vocabulary.RDF;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.ebremer.lws.server.LwsConfiguration;
@@ -35,7 +31,6 @@ import com.ebremer.lws.server.rdf.RdfFormats;
 import com.ebremer.lws.server.rdf.RdfIO;
 import com.ebremer.lws.server.rdf.RdfStore;
 import com.ebremer.lws.server.storage.BinaryStore;
-import com.ebremer.lws.server.vocab.LWS;
 
 /**
  * The core LWS protocol engine: read/create/update/delete over the containment hierarchy,
@@ -61,10 +56,10 @@ public final class ResourceService {
      * The result of reading a resource: its metadata, the RDF representation of an RDF <em>data</em>
      * resource, and — for containers — the members this client may see.
      *
-     * <p>A container's {@code rdf} is {@code null}: its RDF rendering is one of two representations
-     * and is built on demand by {@link ResourceService#containerRepresentation}, because the other
-     * one ({@code application/lws+json}) is what almost every request asks for and building both was
-     * a full model allocated and discarded per listing (finding M23).
+     * <p>A container's {@code rdf} is {@code null}: every representation of a container, its RDF
+     * ones included, is rendered by the HTTP layer from one page of its {@code application/lws+json}
+     * listing, and building a model of the whole membership here was a full model allocated and
+     * discarded per listing (finding M23).
      *
      * <p>{@code children} carries bare {@link ResourceRegistry.ChildRef}s — an IRI and whether it is
      * a container. The listing metadata a page needs comes from
@@ -336,34 +331,6 @@ public final class ResourceService {
                 log.warn("Could not delete {} blob {}: {}", why, key, e.toString());
             }
         }
-    }
-
-    /**
-     * The RDF rendering of a container's (already authorization-filtered) membership.
-     *
-     * <p>Built on demand rather than by {@code read}. Every container GET used to build it, including
-     * the overwhelming majority that go on to serve {@code application/lws+json} and throw it away:
-     * a 200,000-member listing allocated a 400,000-statement Jena model per request for nothing, and
-     * did it for a {@code 304} too (finding M23).
-     */
-    public Model containerRepresentation(LwsResource container, List<ResourceRegistry.ChildRef> children) {
-        Model m = ModelFactory.createDefaultModel();
-        m.setNsPrefix(LWS.PREFIX, LWS.NS);
-        m.setNsPrefix("dcterms", DCTerms.getURI());
-        Resource c = m.createResource(container.iri());
-        c.addProperty(RDF.type, LWS.Container);
-        c.addProperty(LWS.storage, m.createResource(config.storageIri()));
-        c.addLiteral(LWS.totalItems, (long) children.size());
-        if (container.modified() != null) {
-            c.addProperty(DCTerms.modified,
-                    m.createTypedLiteral(container.modified().toString(), XSDDatatype.XSDdateTime));
-        }
-        for (ResourceRegistry.ChildRef child : children) {
-            Resource cr = m.createResource(child.iri());
-            c.addProperty(LWS.items, cr);
-            cr.addProperty(RDF.type, child.container() ? LWS.Container : LWS.DataResource);
-        }
-        return m;
     }
 
     // ----- Create (POST into a container) -----

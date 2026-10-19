@@ -11,9 +11,6 @@ import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.apache.jena.rdf.model.Model;
-import org.apache.jena.rdf.model.ModelFactory;
-import org.apache.jena.rdf.model.Resource;
-import org.apache.jena.vocabulary.RDF;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.ebremer.lws.server.LwsConfiguration;
@@ -25,7 +22,6 @@ import com.ebremer.lws.server.notifications.Subscription;
 import com.ebremer.lws.server.notifications.SubscriptionService;
 import com.ebremer.lws.server.rdf.RdfFormats;
 import com.ebremer.lws.server.rdf.RdfIO;
-import com.ebremer.lws.server.vocab.LWS;
 
 /**
  * The {@code NotificationService} endpoint (lws10-core, Subscriptions; lws10-notifications-webhook).
@@ -41,7 +37,9 @@ import com.ebremer.lws.server.vocab.LWS;
  * </ul>
  *
  * <p>Every representation is JSON by default; a client that ranks an RDF serialization higher gets
- * RDF instead, as before.
+ * RDF instead, as before. The listing is a container, so it is negotiated as one, LWS profile
+ * included ({@link LwsJsonContainers#writeContainer}); a subscription is not, so it never claims
+ * the profile.
  *
  * @author Erich Bremer
  */
@@ -145,24 +143,16 @@ public final class SubscriptionServlet extends HttpServlet {
      * anyone was this.
      *
      * <p>The listing is an LWS container representation (lws10-notifications-webhook requires the
-     * serialization to conform to LWS containers), paginated at {@code lws.container.page-size}.
+     * serialization to conform to LWS containers), paginated at {@code lws.container.page-size}, and
+     * negotiated like any other container: an RDF serialization is the RDF of the same page's
+     * lws+json document, in the LWS profile. It used to be a model built separately — every
+     * subscription on one unpaginated page, without the members' types or format — which was not
+     * the same listing.
      */
     private void listCollection(HttpServletRequest req, HttpServletResponse resp, LwsPrincipal principal)
             throws IOException {
         List<Subscription> subs = subscriptions.listVisibleTo(principal);
         boolean body = req.getMethod().equals("GET");
-        if (RdfFormats.prefersRdf(req.getHeader("Accept"))) {
-            Model m = ModelFactory.createDefaultModel();
-            m.setNsPrefix(LWS.PREFIX, LWS.NS);
-            Resource c = m.createResource(config.subscriptionsEndpointIri());
-            c.addProperty(RDF.type, LWS.Container);
-            c.addLiteral(LWS.totalItems, (long) subs.size());
-            for (Subscription s : subs) {
-                c.addProperty(LWS.items, m.createResource(s.id()));
-            }
-            writeRdf(req, resp, m, body);
-            return;
-        }
         List<JsonObject> members = new ArrayList<>(subs.size());
         for (Subscription s : subs) {
             members.add(LwsJsonContainers.member(s.id(), "WebhookSubscription"));
@@ -170,7 +160,7 @@ public final class SubscriptionServlet extends HttpServlet {
         LwsJsonContainers.Page page = LwsJsonContainers.page(members,
                 LwsJsonContainers.requestedPage(req), config.containerPageSize());
         JsonObject doc = LwsJsonContainers.document(resp, config.subscriptionsEndpointIri(), page);
-        LwsJsonContainers.write(req, resp, doc, body);
+        LwsJsonContainers.writeContainer(req, resp, config.subscriptionsEndpointIri(), doc, body);
     }
 
     private void getOne(HttpServletRequest req, HttpServletResponse resp, LwsPrincipal principal, String id)

@@ -14,6 +14,9 @@ import org.apache.jena.riot.RDFFormat;
 import org.apache.jena.riot.RiotException;
 import org.apache.jena.sparql.core.DatasetGraph;
 import org.apache.jena.sparql.core.DatasetGraphFactory;
+import org.apache.jena.vocabulary.DCTerms;
+import org.apache.jena.vocabulary.XSD;
+import com.ebremer.lws.server.vocab.LWS;
 
 /**
  * Thin helpers for parsing and serializing RDF models to/from bytes.
@@ -59,6 +62,31 @@ public final class RdfIO {
         Model m = ModelFactory.createDefaultModel();
         m.add(ModelFactory.createModelForGraph(dsg.getDefaultGraph()));
         m.setNsPrefixes(dsg.prefixes().getMapping());
+        return m;
+    }
+
+    /**
+     * Read an {@code application/lws+json} document as RDF: JSON-LD 1.1 toRdf, with the LWS context
+     * it names resolved from the copy bundled with the server ({@link JsonLdSecurity}), so nothing is
+     * fetched. This is how lws10-core's LWS profile defines the RDF an lws+json representation
+     * encodes, and so how a container's RDF representations are derived: reading the very document
+     * the JSON representation sends makes them RDF isomorphic to it by construction, which a model
+     * assembled by hand beside it could only hope to stay.
+     *
+     * <p>The context scopes {@code format}, {@code size} and {@code modified} to a
+     * {@code DataResource}, so a contained container's {@code modified} is not RDF and does not
+     * appear; the JSON says it all the same. The usual prefixes are set so Turtle and TriG read the
+     * way the draft's examples do.
+     *
+     * @throws IllegalArgumentException if the document is not JSON-LD the processor accepts
+     */
+    public static Model readLwsJson(byte[] json, String baseIri) {
+        Model m = parse(json, Lang.JSONLD, baseIri);
+        m.clearNsPrefixMap();
+        m.setNsPrefix(LWS.PREFIX, LWS.NS);
+        m.setNsPrefix("dcterms", DCTerms.getURI());
+        m.setNsPrefix("schema", "http://schema.org/");
+        m.setNsPrefix("xsd", XSD.getURI());
         return m;
     }
 

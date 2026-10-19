@@ -152,7 +152,12 @@ public final class AccessServlet extends HttpServlet {
      * Requests and Grants: "the access request and access grant endpoints are LWS containers").
      * Each entry is a data resource — {@code type} {@code ["DataResource", "AccessGrant"]} or
      * {@code ["DataResource", "AccessRequest"]}, {@code format} {@code application/lws+json} — and
-     * the listing is paginated at {@code lws.container.page-size} like any other container.
+     * the listing is paginated at {@code lws.container.page-size} like any other container, and
+     * negotiated like one: the lws+json document, or the same document as {@code application/ld+json}
+     * or {@code application/json}, or its RDF in the LWS profile. It used to be sent as
+     * {@code application/lws+json} whatever was asked, which never claimed a profile but did not
+     * honour one either. The entries themselves are not containers and keep their single
+     * representation.
      */
     private void listCollection(HttpServletRequest req, HttpServletResponse resp, Kind kind,
             LwsPrincipal principal, boolean body) throws IOException {
@@ -169,7 +174,7 @@ public final class AccessServlet extends HttpServlet {
         LwsJsonContainers.Page page = LwsJsonContainers.page(members,
                 LwsJsonContainers.requestedPage(req), config.containerPageSize());
         JsonObject doc = LwsJsonContainers.document(resp, collectionIri, page);
-        writeJson(resp, doc.toString(), body);
+        LwsJsonContainers.writeContainer(req, resp, collectionIri, doc, body);
     }
 
     private void getOne(HttpServletResponse resp, Kind kind, LwsPrincipal principal, String id, boolean body)
