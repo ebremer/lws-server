@@ -16,7 +16,7 @@ whichever is chosen. Who the caller *is* comes from [Authentication](authenticat
 
 ## Owner mode (default)
 
-`lws.access-control=OWNER` is single-tenant: the identities in `lws.owners` (WebIDs or DIDs) have
+`lws.access-control=OWNER` is single-tenant: the identities in `lws.owners` (CID URLs or DIDs) have
 full control. Everyone else can read the storage only when `lws.public-read=true`, which is
 **storage-wide** and defaults to `false`. To open a single resource or subtree to the world, issue an
 [access grant](access-requests.md) with `assignee` `http://xmlns.com/foaf/0.1/Agent` instead;
@@ -58,7 +58,7 @@ are RDF documents containing `acl:Authorization` rules:
 
 - **Modes** map to operations: `acl:Read` → GET/HEAD; `acl:Append` → POST/PUT-create; `acl:Write` →
   PUT-overwrite/PATCH/DELETE (Write implies Append); `acl:Control` → read/write the resource's ACL.
-- **Agents**: `acl:agent <webid>`; `acl:agentClass foaf:Agent` (everyone, incl. anonymous) or
+- **Agents**: `acl:agent <cid-url>`; `acl:agentClass foaf:Agent` (everyone, incl. anonymous) or
   `acl:AuthenticatedAgent` (any signed-in agent); or `acl:agentGroup <group>` — membership is resolved
   by dereferencing the group document (from the local store, or over HTTP for an external group,
   subject to the [SSRF guard](security.md#ssrf-guards)) and checking `vcard:hasMember`.
@@ -82,9 +82,9 @@ are RDF documents containing `acl:Authorization` rules:
 - Editing an ACL requires `acl:Control` on its target (ACLs are not themselves access-controlled,
   avoiding infinite regress).
 
-To onboard a user, point them at their OIDC issuer — their WebID document must link that WebID (the
+To onboard a user, point them at their OIDC issuer — their CID document must link their CID URL (the
 exact IRI the token's `sub` carries) to an `lws:OpenIdProvider` service for that issuer, see
-[Authentication](authentication.md) — and grant their WebID the modes they need in the relevant ACLs.
+[Authentication](authentication.md) — and grant their CID URL the modes they need in the relevant ACLs.
 Self-sovereign users can instead authenticate with a controlled identifier (`did:key`, `did:web` or
 an HTTPS CID document) and be named by that identifier.
 
