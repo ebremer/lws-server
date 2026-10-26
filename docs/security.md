@@ -24,7 +24,7 @@ See [Authorization](authorization.md).
 
 ## Transport security (TLS)
 
-DPoP and WebID/OIDC assume TLS in production. Either run [behind a TLS-terminating reverse
+DPoP and OpenID Connect assume TLS in production. Either run [behind a TLS-terminating reverse
 proxy](deployment.md) (`lws.behind-proxy=true`, `lws.base-uri` set to the external `https://` URL) or
 let the [bare-Jetty launcher terminate TLS](deployment.md) via ACME/Let's Encrypt
 (`lws.tls.enabled=true`). `lws.require-https=true` makes the server refuse to start on a non-HTTPS,
@@ -84,7 +84,7 @@ recommends describing the capability only where a deployment needs it).
 The server makes outbound HTTP requests from partly-untrusted input in several places; each is
 guarded:
 
-- **Auth & WAC dereferences** — the WebID/CID `sub`, `did:web` documents, the OIDC `iss` and its
+- **Auth & WAC dereferences** — the CID URL `sub`, `did:web` documents, the OIDC `iss` and its
   JWKS, external authorization-server metadata, and `acl:agentGroup` documents are gated by an
   `OutboundFetchPolicy`: non-`http(s)` schemes are always refused (closing `file://` local-file
   reads), and by default hosts resolving to loopback, private, link-local (incl. the cloud-metadata

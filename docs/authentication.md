@@ -132,7 +132,7 @@ every claim read from the assertion's direct children. Setting `lws.saml.audienc
 
 **Interactive sign-in.** `jakartaee-pac4j` additionally provides optional OIDC sign-in for the
 [management UI](management-ui.md) when an OIDC client is configured (`lws.oidc.*`); the console login
-applies the same WebID-to-provider check as the API.
+applies the same CID-URL-to-provider check as the API.
 
 ## Audience binding
 
@@ -200,7 +200,7 @@ cache and the nonce secret are per-process; a clustered deployment would need a 
 
 ## Outbound-fetch SSRF guard
 
-Authentication dereferences URLs taken from **untrusted token claims** — the WebID/CID `sub`, a
+Authentication dereferences URLs taken from **untrusted token claims** — the CID URL `sub`, a
 `did:web` document, the OIDC issuer `iss` and its JWKS, an external authorization server's metadata
 — which is a server-side request forgery (SSRF) surface. An `OutboundFetchPolicy` gates every such
 fetch:

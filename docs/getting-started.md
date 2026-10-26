@@ -88,7 +88,7 @@ See the [HTTP API](http-api.md) for the full surface.
 
 ## The first owner
 
-`lws.owners` holds WebIDs/DIDs, but you need a *credential* for one before you can act as that owner.
+`lws.owners` holds CID URLs and DIDs, but you need a *credential* for one before you can act as that owner.
 A `did:key` subject of the
 [self-signed Controlled Identifier](https://w3c.github.io/lws-protocol/lws10-authn-ssi-cid/) suite
 needs no identity provider — its DID document is derived from the identifier itself — so a bundled

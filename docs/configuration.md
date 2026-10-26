@@ -38,11 +38,11 @@ without a stack trace.
 
 | Property | Default | Meaning |
 |---|---|---|
-| `lws.base-uri` | `http://localhost:8080` | Public base IRI of the storage. Must be an `http(s)` URL; it may carry a path (`https://host/lws`) when a proxy publishes the server under one — see [Deployment](deployment.md#under-a-path-prefix). In production set it to the external `https://` URL — every minted IRI, DPoP `htu`, WebID, ACL and the authorization server's issuer derive from it. |
+| `lws.base-uri` | `http://localhost:8080` | Public base IRI of the storage. Must be an `http(s)` URL; it may carry a path (`https://host/lws`) when a proxy publishes the server under one — see [Deployment](deployment.md#under-a-path-prefix). In production set it to the external `https://` URL — every minted IRI, DPoP `htu`, CID URL, ACL and the authorization server's issuer derive from it. |
 | `lws.listen-port` | port of `lws.base-uri`, else `8080` | HTTP listen port, when it differs from the base URI's — typically behind a reverse proxy, where the base URI is the external address. |
 | `lws.data-dir` | `lws-data` | Directory for the TDB2 dataset, binary blobs and signing keys (key directories are made owner-only at startup). |
 | `lws.system-prefix` | `.lws` | Path prefix for the server's own endpoints (storage description, token endpoint, JWKS, subscriptions, search, access requests/grants). Reserved: no resource may be created under it. |
-| `lws.owners` | *(empty)* | Space/comma-separated owner WebIDs/DIDs. **Empty ⇒ the server refuses to start** unless `lws.dev.open=true`. |
+| `lws.owners` | *(empty)* | Space/comma-separated owner CID URLs/DIDs. **Empty ⇒ the server refuses to start** unless `lws.dev.open=true`. |
 | `lws.dev.open` | `false` | Permit the development-only postures: an empty `lws.owners` (open mode — everything permitted for everyone) and `lws.ui.dev-login` on a non-loopback base URI. |
 | `lws.public-read` | `false` | Whether non-owners may read the storage **at all** — storage-wide, not per resource. To open one resource or subtree, issue an access grant to `foaf:Agent` instead. |
 | `lws.access-control` | `OWNER` | `OWNER` (single-tenant owner/public-read) or `WAC` (multi-user [Web Access Control](authorization.md)). |
@@ -84,7 +84,7 @@ The storage embeds an OAuth 2.0 authorization server, per the LWS core Authoriza
 | `lws.dpop.require` | `false` | Refuse plain `Bearer` entirely (a DPoP-bound token is always refused as `Bearer`). |
 | `lws.dpop.jti-cache-size` | `100000` | DPoP proof ids retained for replay detection. |
 | `lws.oidc.discovery-uri` / `.client-id` / `.client-secret` | | Enable interactive OpenID Connect single sign-on for the [management UI](management-ui.md). |
-| `lws.ui.dev-login` | `false` | Enable the UI's developer sign-in (WebID impersonation; **dev only** — loopback base URI only unless `lws.dev.open=true`). |
+| `lws.ui.dev-login` | `false` | Enable the UI's developer sign-in (CID URL impersonation; **dev only** — loopback base URI only unless `lws.dev.open=true`). |
 
 ## Notifications
 

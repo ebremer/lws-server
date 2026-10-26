@@ -9,7 +9,7 @@ nav_order: 12
 1. TOC
 {:toc}
 
-DPoP, WebID/OIDC and the LWS authorization flow assume the storage is reached over **TLS** in
+DPoP, OpenID Connect and the LWS authorization flow assume the storage is reached over **TLS** in
 production. There are two ways to get there — use one, not both.
 
 ## Option A — behind a reverse proxy (default model)
@@ -17,7 +17,7 @@ production. There are two ways to get there — use one, not both.
 The server terminates **plain HTTP** and sits behind a reverse proxy (nginx, Apache, Caddy, Traefik,
 …) that terminates HTTPS.
 
-1. Set `lws.base-uri` to the **external** `https://` URL. DPoP `htu`, WebIDs, ACLs, the authorization
+1. Set `lws.base-uri` to the **external** `https://` URL. DPoP `htu`, CID URLs, ACLs, the authorization
    server's issuer and every minted IRI come from this value (not the internal request scheme/host),
    so everything is correct even though the app speaks HTTP behind the proxy.
 2. Set `lws.listen-port` to the port the proxy forwards to, if it is not the base URI's port (an

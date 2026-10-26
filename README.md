@@ -158,7 +158,7 @@ exception. Key settings:
 | `lws.base-uri` | `http://localhost:8080` | Public base IRI; also sets the listen port |
 | `lws.listen-port` | port of `lws.base-uri`, else `8080` | HTTP listen port, when it differs from the base URI (behind a reverse proxy) |
 | `lws.data-dir` | `lws-data` | Directory for TDB2, blobs and keys |
-| `lws.owners` | *(empty)* | Space/comma-separated owner WebIDs. **Empty ⇒ refuses to start** unless `lws.dev.open=true` |
+| `lws.owners` | *(empty)* | Space/comma-separated owner CID URLs or DIDs. **Empty ⇒ refuses to start** unless `lws.dev.open=true` |
 | `lws.dev.open` | `false` | Permit development-only postures: empty `lws.owners` (open mode) and `lws.ui.dev-login` off-loopback |
 | `lws.public-read` | `false` | Whether non-owners may read the storage **at all** — storage-wide, not per resource |
 | `lws.access-control` | `OWNER` | `OWNER` (single-tenant) or `WAC` (multi-user Web Access Control) |
@@ -239,10 +239,10 @@ exception. Key settings:
 ### Running behind a reverse proxy (TLS)
 
 The server terminates **plain HTTP** and does not do TLS itself; in production it is meant to sit
-behind a reverse proxy (nginx, Caddy, Traefik, …) that terminates HTTPS. DPoP and WebID/OIDC assume
+behind a reverse proxy (nginx, Caddy, Traefik, …) that terminates HTTPS. DPoP and OpenID Connect assume
 TLS, so:
 
-1. Set `lws.base-uri` to the **external** `https://` URL — DPoP `htu`, WebIDs, ACLs and every minted
+1. Set `lws.base-uri` to the **external** `https://` URL — DPoP `htu`, CID URLs, ACLs and every minted
    IRI come from this value, not from the (internal) request scheme/host, so it works correctly even
    though the app speaks HTTP behind the proxy.
 2. Set `lws.behind-proxy=true` so the server trusts `X-Forwarded-Proto`/`X-Forwarded-Host` /
@@ -349,7 +349,7 @@ challenge types (TLS-ALPN-01, DNS-01) and non-Let's-Encrypt CAs are not wired up
 
 ### Bootstrapping the first owner
 
-`lws.owners` holds WebIDs/DIDs, but you need a *credential* for one before you can act as that
+`lws.owners` holds CID URLs and DIDs, but you need a *credential* for one before you can act as that
 owner. A `did:key` subject of the
 [self-signed controlled identifier](https://w3c.github.io/lws-protocol/lws10-authn-ssi-cid/) suite
 needs no identity provider — its DID document is derived from the identifier itself — so a bundled
@@ -691,7 +691,7 @@ Rules:
 
 - **Modes** map to operations: `acl:Read`→GET/HEAD; `acl:Append`→POST/PUT-create; `acl:Write`→
   PUT-overwrite/PATCH/DELETE (Write implies Append); `acl:Control`→read/write the resource's ACL.
-- **Agents**: `acl:agent <webid>`; `acl:agentClass foaf:Agent` (everyone, incl. anonymous) or
+- **Agents**: `acl:agent <cid-url>`; `acl:agentClass foaf:Agent` (everyone, incl. anonymous) or
   `acl:AuthenticatedAgent` (any signed-in agent); or `acl:agentGroup <group>` — membership is
   resolved by dereferencing the group document (from the local store, or over HTTP for an external
   group) and checking `vcard:hasMember`, cached for `lws.wac.group-cache-seconds`. An external
@@ -715,9 +715,9 @@ Rules:
 - Editing an ACL requires `acl:Control` on its target (ACLs are not themselves access-controlled,
   avoiding infinite regress).
 
-To create users, point each at their OIDC issuer (their WebID document must link that WebID — the
+To create users, point each at their OIDC issuer (their CID document must link their CID URL — the
 exact IRI the token's `sub` carries — to an `lws:OpenIdProvider` service for that issuer; see
-Authentication) and grant their WebID the modes they need in the relevant ACLs. The interactive
+Authentication) and grant their CID URL the modes they need in the relevant ACLs. The interactive
 console login applies the same check as the API.
 
 ### Notifications
@@ -919,7 +919,7 @@ allowed to perform.
 Sign in at `/app/login` by: pasting an OpenID Connect **ID token** (validated just like the HTTP
 API); **OpenID Connect single sign-on** (browser redirect via pac4j, shown when an OIDC client is
 configured); or, when `lws.ui.dev-login=true`, a **developer sign-in** that lets you act as any
-WebID (impersonation — development/administration only).
+CID URL (impersonation — development/administration only).
 
 **Cross-site request forgery.** Wicket has no CSRF token and its stateful callback URLs are
 guessable, so the console registers Wicket's `ResourceIsolationRequestCycleListener` (Fetch
@@ -1115,7 +1115,7 @@ The notable limitations and deliberate design choices are summarised below.
   `lws.dpop.jti-cache-size`: an entry evicted because the cache is **full** has not expired, so the
   proof that wrote it is replayable again, and the server warns when that starts happening.
 - **Outbound-fetch SSRF guard.** Authentication dereferences URLs from untrusted token claims (the
-  WebID/CID `sub`, the OIDC issuer `iss` and its JWKS) and WAC dereferences `acl:agentGroup`
+  CID URL `sub`, the OIDC issuer `iss` and its JWKS) and WAC dereferences `acl:agentGroup`
   documents. These are gated by an `OutboundFetchPolicy`: non-`http(s)` schemes are always refused
   (closing `file://` local-file reads via Jena's loader), and by default hosts resolving to loopback,
   private, link-local (incl. the cloud-metadata `169.254.169.254`), wildcard or multicast addresses

@@ -407,13 +407,13 @@ public final class LwsConfiguration {
                     : "";
             throw new LwsConfigurationException("lws.owners is empty, which is open mode: every read, "
                     + "write and control decision is permitted for every client, including anonymous "
-                    + "ones." + wac + " Configure at least one owner WebID (DidKeyTool mints one "
-                    + "offline — see lws.example.properties), or set lws.dev.open=true to run this "
+                    + "ones." + wac + " Configure at least one owner, a CID URL or a DID (DidKeyTool "
+                    + "mints a did:key offline — see lws.example.properties), or set lws.dev.open=true to run this "
                     + "way deliberately.");
         }
         if (uiDevLogin && !isLoopbackBaseUri() && !devOpen) {
             throw new LwsConfigurationException("lws.ui.dev-login=true lets any client sign in as any "
-                    + "WebID, and lws.base-uri (" + baseUri + ") is not a loopback address. Sign in "
+                    + "CID URL, and lws.base-uri (" + baseUri + ") is not a loopback address. Sign in "
                     + "with an ID token instead, or set lws.dev.open=true.");
         }
         if (devOpen && requireHttps) {
@@ -641,7 +641,7 @@ public final class LwsConfiguration {
         if ("https".equalsIgnoreCase(scheme) || isLoopbackBaseUri()) {
             return;
         }
-        String message = "lws.base-uri is not HTTPS (" + baseUri + "); DPoP and WebID/OIDC assume TLS "
+        String message = "lws.base-uri is not HTTPS (" + baseUri + "); DPoP and OpenID Connect assume TLS "
                 + "in production. Terminate TLS at a reverse proxy, set lws.base-uri to the external "
                 + "https:// URL, and set lws.behind-proxy=true.";
         if (requireHttps) {
