@@ -67,9 +67,10 @@ fine-grained access rules) decide who may do what.
 - **[Deployment & TLS](deployment.md)** — behind a reverse proxy (at the root or under a path), or with built-in Let's Encrypt.
 - **[Security](security.md)** — the consolidated security model and its limits.
 
-> **Specification baseline.** The server follows the LWS drafts of **19 October 2026**
-> (`w3c/lws-protocol` @ `9a08ff6`, the core Working Draft published that day: RFC 9728 discovery, the
-> LWS profile, moving resources); before it, those of 5 October and 21 September 2026. [COMPLIANCE.md](https://github.com/ebremer/lws-server/blob/master/COMPLIANCE.md)
+> **Specification baseline.** The server follows the LWS drafts of **9 November 2026**
+> (`w3c/lws-protocol` @ `db64f56`, the core Working Draft published that day: a create in a missing
+> container is the *Target Not Found* outcome, `404`); before it, those of 19 October (RFC 9728
+> discovery, the LWS profile, moving resources), 5 October and 21 September 2026. [COMPLIANCE.md](https://github.com/ebremer/lws-server/blob/master/COMPLIANCE.md)
 > in the repository records what changed since the previous baseline and where the server departs
 > from the drafts, deliberately. Where the drafts are still silent the implementation follows the
 > LDP / Solid conventions it derives from (trailing-slash containers, `Link: rel="type"` interaction

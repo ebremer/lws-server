@@ -30,9 +30,11 @@ It implements:
 - **[LWS Search & Type Index](https://w3c.github.io/lws-protocol/lws10-index/)** — the `TypeIndexService` and the `QUERY`-based `TypeSearchService` (authorization-filtered).
 - **[Access Requests & Grants](https://w3c.github.io/lws-protocol/lws10-core/#access-requests-and-grants)** — ODRL-based `AccessRequestService`/`AccessGrantService`; grants are enforced and revocable.
 
-> **Specification baseline:** the LWS drafts of **19 October 2026** (`w3c/lws-protocol` @ `9a08ff6`,
-> the core Working Draft published that day: RFC 9728 discovery, the LWS profile, moving resources).
-> Before it, the drafts of 5 October (`ef02548`) and 21 September 2026 (`3ddc642`). See
+> **Specification baseline:** the LWS drafts of **9 November 2026** (`w3c/lws-protocol` @ `db64f56`,
+> the core and SAML Working Drafts published that day: a create in a missing container is the
+> *Target Not Found* outcome, `404`). Before it, the drafts of 19 October (`9a08ff6`: RFC 9728
+> discovery, the LWS profile, moving resources), 5 October (`ef02548`) and 21 September 2026
+> (`3ddc642`). See
 > [COMPLIANCE.md](COMPLIANCE.md) for what changed since the previous baselines and where this server
 > departs from the drafts, deliberately. Where the drafts
 > are still silent this implementation follows the **LDP / Solid Protocol conventions** it derives
@@ -1057,8 +1059,8 @@ per-member authorization filtering of listings by
 
 The notable limitations and deliberate design choices are summarised below.
 
-- Tracks the LWS **editor's drafts** — currently those of 19 October 2026 (`w3c/lws-protocol` @
-  `9a08ff6`, the core Working Draft of that day); gaps are filled with LDP/Solid conventions and may change. [COMPLIANCE.md](COMPLIANCE.md)
+- Tracks the LWS **editor's drafts** — currently those of 9 November 2026 (`w3c/lws-protocol` @
+  `db64f56`, the core Working Draft of that day); gaps are filled with LDP/Solid conventions and may change. [COMPLIANCE.md](COMPLIANCE.md)
   lists the deliberate departures.
 - The **storage URI is the root container's URI**, as lws10-core permits, so `/` has two
   representations chosen by `Accept`: the storage description by default, the root listing for a
