@@ -491,21 +491,38 @@ public final class LwsResourceServlet extends HttpServlet {
      * pre-filter, so it is deliberately permissive — it rejects only when denial is already
      * certain. Without it, a request destined for 401/403 still costs the server a full body
      * buffer first, which is what makes an unauthorized writer expensive.
+     *
+     * <p>A write into a container that does not exist is refused as absent, not as forbidden. The
+     * owner authorizer allows nothing on an IRI with no stored resource, so such a request always
+     * failed the check above, and answering it with the plain refusal made a create in a missing
+     * container {@code 401} in open mode, where nothing requires authentication, and {@code 403} to
+     * the storage's own owner once {@code lws.mask-forbidden-as-not-found} was off. lws10-core
+     * gives that create the <em>Target Not Found</em> outcome, {@code 404} (w3c/lws-protocol #263),
+     * and the service answers it with {@link ResourceService#absenceFor}; so does this.
      */
     private void requireWriteBeforeBody(HttpServletRequest req, String path, LwsPrincipal principal,
             boolean intoContainer) {
         String iri = Iris.toIri(config.baseUri(), path);
+        String parentPath = intoContainer ? null : Iris.parentPath(path);
+        String parentIri = parentPath == null ? null : Iris.toIri(config.baseUri(), parentPath);
         boolean allowed;
         if (intoContainer) {
             allowed = service.canAppend(principal, iri);
         } else {
             // A PUT may be a replace (Write on the target) or a create (Append on its parent).
-            String parentPath = Iris.parentPath(path);
             allowed = service.canWrite(principal, iri)
-                    || (parentPath != null
-                            && service.canAppend(principal, Iris.toIri(config.baseUri(), parentPath)));
+                    || (parentIri != null && service.canAppend(principal, parentIri));
         }
         if (!allowed) {
+            // The container the write would go into, when it is not there: a POST's target, or the
+            // parent of a PUT or PATCH whose target is not there either. Asked only of a refused
+            // request, so an allowed write costs no extra read.
+            String missing = intoContainer
+                    ? (service.exists(iri) ? null : iri)
+                    : (parentIri == null || service.exists(iri) || service.exists(parentIri) ? null : parentIri);
+            if (missing != null) {
+                throw service.absenceFor(principal, missing, AclMode.APPEND);
+            }
             // Through the same helper the service uses, so this pre-filter cannot disclose by
             // answering 403 what the authoritative check a moment later would have masked as 404.
             // A control that two code paths implement differently is a control with a way around it.

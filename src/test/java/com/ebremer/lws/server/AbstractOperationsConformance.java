@@ -843,6 +843,44 @@ abstract class AbstractOperationsConformance {
         assertTrue(allow.contains("PUT"), allow);
     }
 
+    // ----- conformance: a create in a missing container is Target Not Found (#263) -----
+
+    /**
+     * The core of 9 November 2026 (w3c/lws-protocol #263) dropped "MUST return 404 unless another
+     * status code is more appropriate" for a create in a container that does not exist. What it
+     * says now: the operation reports the <em>Target Not Found</em> outcome, the status table maps
+     * that to {@code 404} with optional RFC 9457 details, and a create adds a resource to a
+     * <em>single existing</em> container, so it never creates the missing levels on the way.
+     *
+     * <p>The first request is the core's own example (a {@code text/plain} "test" posted to a
+     * container that does not exist). The PUTs and the request two levels down check that no
+     * method creates a container on the way, and the existing parent's listing that the refused
+     * requests left nothing in it.
+     */
+    @Test
+    void createInAMissingContainerIsTargetNotFound() throws Exception {
+        assertEquals(201, send("PUT", "/tnf/", null,
+                "Link", "<https://www.w3.org/ns/lws#Container>; rel=\"type\"").statusCode());
+
+        HttpResponse<String> post = send("POST", "/tnf/notes/", "test", "Content-Type", "text/plain");
+        assertEquals(404, post.statusCode(), post.body());
+        assertTrue(post.headers().firstValue("Content-Type").orElse("").startsWith("application/problem+json"),
+                "the error details the status table offers, in RFC 9457 form");
+        assertEquals(404, parse(post.body()).getInt("status"));
+
+        assertEquals(404, send("PUT", "/tnf/notes/note1", "test", "Content-Type", "text/plain").statusCode(),
+                "a PUT into the missing container reports the same outcome");
+        assertEquals(404, send("POST", "/tnf/notes/deeper/", "test", "Content-Type", "text/plain").statusCode());
+        assertEquals(404, send("PUT", "/tnf/notes/deeper/leaf", "test", "Content-Type", "text/plain").statusCode());
+
+        assertEquals(404, send("GET", "/tnf/notes/", null).statusCode(), "no container was created on the way");
+        assertEquals(404, send("GET", "/tnf/notes/deeper/", null).statusCode());
+        HttpResponse<String> listing = send("GET", "/tnf/", null, "Accept", "application/lws+json");
+        assertEquals(200, listing.statusCode(), listing.body());
+        assertEquals(0, parse(listing.body()).getJsonArray("items").size(),
+                "the refused creates left the parent empty: " + listing.body());
+    }
+
     // ----- conformance: a type search is a QUERY (lws10-index) -----
 
     /**
