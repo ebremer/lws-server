@@ -79,11 +79,33 @@ changed upstream since the previous baseline, and the deliberate divergences; th
   `mvn -o test` → **661 tests, 0 failures** (1 skipped off Windows). COMPLIANCE.md's "Re-review of 19 October 2026" has
   the account; divergences 9 (bundled context), 12 (moving on by default) and 13 (identifiers not
   preserved) are new or changed.
-- [ ] **D-17 · Next re-check.** `git fetch` in `w3c/lws-protocol`, then
-  `git diff --stat 9a08ff6 origin/main` and `gh pr list --repo w3c/lws-protocol --state merged`.
-  Watch whether protected resource metadata stays (it is at risk); if it does, consider turning
-  `lws.oauth.legacy-challenge` off by default. Also re-check `lws-contrib/lws-test-suite`, which
-  cannot be run against a server that follows the Working Draft as long as it is at `b8cb134`.
+- [x] **D-17 · The drafts of 9 November 2026** (`db64f56`, published as `WD-lws10-core-20261109`
+  and the SAML suite's Working Draft of the same day; core `WD-lws10-core-20261023` carried #263
+  alone; OpenID and SSI-CID still the Working Drafts of 15 October). One normative change, #263: a
+  create in a missing container is the *Target Not Found* outcome (`404`) instead of "MUST 404
+  unless another status is more appropriate", the status table gains `401`/`403`/`404` with
+  optional RFC 9457 details, a server MAY answer `404` for `403` to hide a resource, and one create
+  makes one resource in one existing container. One fix: the servlet's pre-body check refused a
+  write into a missing container as forbidden (the owner authorizer allows nothing on an IRI with
+  nothing stored), so it was `401` in open mode and `403` to the owner with
+  `lws.mask-forbidden-as-not-found=false`; only the masking made it `404` for the owner. It is now
+  refused as absent, as the service does. New test `createInAMissingContainerIsTargetNotFound` (the
+  core's example and the note), run in the open, owner and new unmasked-owner postures; it fails in
+  two of them without the fix. `lws-contrib/lws-test-suite` is now one runnerless manifest
+  (`7a2ba98`, 39 tests): run in open mode, it found the same fault (37/2 before, 38/1 after, the one
+  failure asserting status 999 on purpose). Touchstone `14f315e` (D-0111) on master `aef56f2`, before
+  the fix: run `41876d7c`, 204/0/15 (it plays the masked owner). Protected resource metadata is still
+  at risk, so `lws.oauth.legacy-challenge` stays on. A Windows checkout (`core.autocrlf=true`) had
+  given the bundled `contexts/lws-v1.jsonld` CRLF line endings, failing its sha256 pin;
+  `.gitattributes` now exempts the bundled contexts. COMPLIANCE.md's "Re-review of 9 November 2026"
+  has the account.
+- [ ] **D-18 · Next re-check.** `git fetch` in `w3c/lws-protocol`, then
+  `git diff --stat db64f56 origin/main` and the merged pull requests since. Watch #299 (the OAuth
+  sections move to a separate `lws10-oauth` profile: requirement references change, perhaps
+  behaviour), #277 (format and size per representation in container items), #260 (index service
+  types in the LWS context) and #301 (`invalid_token` in the token-validation example; already
+  sent). Turn `lws.oauth.legacy-challenge` off by default once protected resource metadata is no
+  longer at risk.
 ---
 
 ## Resume here — state as of 2026-08-27 (late)

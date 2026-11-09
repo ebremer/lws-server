@@ -16,7 +16,7 @@ nav_order: 5
 | `GET` / `HEAD` | data resource | Content-negotiated representation (Turtle, JSON-LD, N-Triples, RDF/XML); binary streamed as-is, with byte-range support (`206`/`416`, `Accept-Ranges: bytes`). |
 | `GET` / `HEAD` | `/` (the storage URI) | The [storage description](#discovery--the-storage-description) (`application/lws+cid`), unless the client asks for a container representation — `application/lws+json`, `application/ld+json`, `application/json` or an RDF type, with or without the LWS profile — in which case the root container listing below. |
 | `GET` / `HEAD` | container | `application/lws+json` listing (`id`/`type`/`totalItems`/`items[]`, each with `id`/`type`/`format`/`size`/`modified`, `type` naming any declared types after `DataResource`/`Container`); also as `application/ld+json` / `application/json` (the same body, the requested `Content-Type` echoed) or as RDF read from that document — see [Content negotiation](#content-negotiation); paginated (`?page=N`, `Link` rel `first`/`prev`/`next`/`last`) above `lws.container.page-size`, in every representation. |
-| `POST` | a container | Create a contained resource; `Slug` names it, `Link: rel="type"` picks container/RDF/non-RDF; `201` + `Location`. A [reserved name](#reserved-names) is refused with `409`. |
+| `POST` | a container | Create a contained resource; `Slug` names it, `Link: rel="type"` picks container/RDF/non-RDF; `201` + `Location`. A container that does not exist is `404` (lws10-core's *Target Not Found*), and no container is created on the way: one create makes one resource in one existing container. `POST` to a data resource is `405`. A [reserved name](#reserved-names) is refused with `409`. |
 | `PUT` | any IRI | Create (new) or replace (existing) at that exact IRI; replacing MUST be conditional. The parent container must already exist (`404` otherwise; `409` if the parent is not a container). A reserved path is refused with `409`; an existing container with `409` (its representation is its membership); a `Link: rel="type"` that contradicts the IRI's own shape with `400`. |
 | `PATCH` | RDF or JSON resource | RDF: `application/sparql-update` only (JSON Merge Patch is not defined over RDF and is not accepted there); JSON & linkset: `application/json-patch+json` (RFC 6902, the format lws10-core requires) or `application/merge-patch+json` (RFC 7396). See [Metadata & Linksets](metadata-linksets.md). |
 | `DELETE` | any resource | Delete (non-empty container → `409`, or recursive with `Depth: infinity`); removes the resource's metadata too. |
@@ -119,6 +119,13 @@ WWW-Authenticate: Bearer resource_metadata="https://storage.example/.well-known/
 WWW-Authenticate: DPoP resource_metadata="https://storage.example/.well-known/oauth-protected-resource/notes/", as_uri="https://storage.example", realm="https://storage.example/", algs="ES256 ES384 ES512 EdDSA RS256 RS384 RS512 PS256 PS384 PS512"
 Link: <https://storage.example/>; rel="https://www.w3.org/ns/lws#storage"
 ```
+
+The three refusals in lws10-core's status table are `401` (*Unknown Requester*: authenticate and
+try again), `403` (*Not Permitted*) and `404` (*Target Not Found*). An authenticated client that
+may not read a resource is told `404` where it would have been told `403`, so the status does not
+say whether the resource is there (`lws.mask-forbidden-as-not-found`, default `true`; the core
+allows it). An anonymous client of a storage that needs authentication is told `401` for an absent
+resource as for a hidden one, unless it may read the container the resource would be in.
 
 A conflict that the draft gives an example for — moving a container into itself or into one of its
 descendants — keeps the draft's problem title ("Cannot move a container into one of its own

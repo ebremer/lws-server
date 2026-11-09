@@ -1,15 +1,17 @@
 # LWS Protocol Compliance: lws-server
 
-**Date:** 2026-09-22; **last re-reviewed 2026-10-19** against the specifications as they stood on
-**19 October 2026** (`w3c/lws-protocol` @ [`9a08ff6`](https://github.com/w3c/lws-protocol/commit/9a08ff6)),
-the text of the core Working Draft W3C published that day. Three of its changes are normative for a
-storage server and each needed code: RFC 9728 protected resource metadata for discovery (#256), the
-LWS profile in content negotiation (#253) and moving resources between containers (#237); see
-[Re-review of 19 October 2026](#re-review-of-19-october-2026).
-**Specification baseline:** the LWS drafts of **19 October 2026** — `w3c/lws-protocol` @
-[`9a08ff6`](https://github.com/w3c/lws-protocol/commit/9a08ff6) ("Define how resources move between
-containers", #237). Before it, the drafts of 5 October 2026 (`ef02548`, #255) and of 21 September 2026
-(`3ddc642`, #233), whose changes the table
+**Date:** 2026-09-22; **last re-reviewed 2026-11-09** against the specifications as they stood on
+**9 November 2026** (`w3c/lws-protocol` @ [`db64f56`](https://github.com/w3c/lws-protocol/commit/db64f56)),
+the text of the core and SAML Working Drafts W3C published that day. One change since 19 October is
+normative for a storage server, #263 (a create in a container that does not exist is *Target Not
+Found*, `404`), and checking it found a fault: outside the owner posture with masking on, such a
+create was refused `401` or `403`. Fixed; see [Re-review of 9 November 2026](#re-review-of-9-november-2026).
+**Specification baseline:** the LWS drafts of **9 November 2026** — `w3c/lws-protocol` @
+[`db64f56`](https://github.com/w3c/lws-protocol/commit/db64f56) (core: #263 of 23 October and #281's
+section references; SAML: #298's example). Before it, the drafts of 19 October 2026 (`9a08ff6`, #237:
+RFC 9728 discovery, the LWS profile and moving resources, each of which needed code; see
+[Re-review of 19 October 2026](#re-review-of-19-october-2026)), of 5 October 2026 (`ef02548`, #255) and
+of 21 September 2026 (`3ddc642`, #233), whose changes the table
 [What changed since the previous baseline](#what-changed-since-the-previous-baseline) lists.
 **Previous baseline:** the drafts this server was built against between June and August 2026, which
 predate most of the changes listed below. That revision of this document (2026-07-09) is in git
@@ -19,7 +21,7 @@ history.
 
 ## Short answer
 
-`lws-server` implements the **LWS 1.0 drafts of 19 October 2026**: LWS Core — including
+`lws-server` implements the **LWS 1.0 drafts of 9 November 2026**: LWS Core — including
 the OAuth 2.0 authorization baseline with RFC 9728 discovery, the controlled-identifier storage
 description, the LWS profile, moving resources between containers, the notification data model and
 access requests and grants —, the vocabulary, the Type Index and QUERY-based Type
@@ -34,16 +36,67 @@ URL, and the Core Editor's Draft still carries editorial scaffolding. Conformanc
 
 ## Specification status
 
-| Specification | Status at the baseline | Latest on w3.org/TR, 19 Oct 2026 | This server |
+| Specification | Status at the baseline | Latest on w3.org/TR, 9 Nov 2026 | This server |
 |---|---|---|---|
-| [lws10-core](https://w3c.github.io/lws-protocol/lws10-core/) | Editor's Draft, 19 Oct 2026 | Working Draft **19 Oct 2026** — the baseline text | Implemented; see below |
-| [lws10-vocab](https://w3c.github.io/lws-protocol/lws10-vocab/) | Draft (vocabulary 19 Oct 2026: `MoveResource`, `appliesTo`, `preservesIdentifier`, `as:Move`) | Group Note Draft 14 Jul 2026 (predates `StorageResource` and the move terms) | Terms used as defined; the context the Working Group builds from it is bundled (divergence 9) |
+| [lws10-core](https://w3c.github.io/lws-protocol/lws10-core/) | Editor's Draft, 9 Nov 2026 | Working Draft **9 Nov 2026** — the baseline text (the Working Draft of 23 Oct 2026 carried #263 alone) | Implemented; see below |
+| [lws10-vocab](https://w3c.github.io/lws-protocol/lws10-vocab/) | Draft (vocabulary unchanged since 19 Oct 2026: `MoveResource`, `appliesTo`, `preservesIdentifier`, `as:Move`) | Group Note Draft 14 Jul 2026 (predates `StorageResource` and the move terms) | Terms used as defined; the context the Working Group builds from it is bundled (divergence 9) |
 | [lws10-index](https://w3c.github.io/lws-protocol/lws10-index/) (was `lws10-searchindex`) | Draft, renamed 21 Sep 2026 | not published (editor's draft only) | Implemented, `QUERY` search |
 | [lws10-notifications-webhook](https://w3c.github.io/lws-protocol/lws10-notifications-webhook/) | Draft (split from `lws10-notifications`, 24 Jul 2026) | not published (editor's draft only) | Implemented |
 | [lws10-authn-openid](https://w3c.github.io/lws-protocol/lws10-authn-openid/) | Draft | Working Draft **15 Oct 2026** (wording only since 3 Aug) | Implemented, at the token endpoint and directly |
-| [lws10-authn-saml](https://w3c.github.io/lws-protocol/lws10-authn-saml/) | Draft | Working Draft **15 Oct 2026** (wording and the example's XML only since 3 Aug) | Implemented when an IdP certificate is configured |
+| [lws10-authn-saml](https://w3c.github.io/lws-protocol/lws10-authn-saml/) | Draft | Working Draft **9 Nov 2026** (wording and the example's XML only since 3 Aug) | Implemented when an IdP certificate is configured |
 | [lws10-authn-ssi-cid](https://w3c.github.io/lws-protocol/lws10-authn-ssi-cid/) | Draft; DID subjects since 21 Sep 2026 | Working Draft **15 Oct 2026** (wording only since 21 Sep) | Implemented, with `did:key` and `did:web` subjects |
 | [lws10-authn-ssi-did-key](https://w3c.github.io/lws-protocol/lws10-authn-ssi-did-key/) | **Discontinued** 18 Sep 2026 | Working Draft 3 Aug 2026; published as a **Discontinued Draft on 29 Sep 2026** | Credentials without a `kid` still accepted, deprecated; not advertised |
+
+## Re-review of 9 November 2026
+
+Re-checked on 2026-11-09 against `w3c/lws-protocol` `main` at `db64f56`, the text of the core and SAML
+Working Drafts W3C published that day (`WD-lws10-core-20261109`); the core Working Draft of 23 October
+carried #263 alone. The OpenID and SSI-CID suites are still the Working Drafts of 15 October, and the
+vocabulary, index and webhook drafts did not change. Protected resource metadata is still marked at
+risk, so `as_uri`/`realm` stay in the challenge (`lws.oauth.legacy-challenge`).
+
+| Commit | Change | Effect here |
+|---|---|---|
+| #263 (23 Oct) | A create in a container that does not exist is no longer "MUST return a 404 error status unless another status code is more appropriate". The create operation reports the **Target Not Found** outcome (now a defined term), and an example shows its `404`. The status table gains `401` Unknown Requester (`WWW-Authenticate` says how to authenticate), `403` Not Permitted and `404` Target Not Found, each with optional RFC 9457 details. A server that does not want to reveal whether a resource exists to a client not permitted to access it MAY answer `404` for `403`. A note says a create adds a resource to one existing container, so several levels of containers take one create each | **One fix.** For the storage's owner, `POST` and `PUT` into a missing container already answered `404` with RFC 9457 details and created nothing on the way, but only because masking (below) hid a `403`. The servlet refuses a write before reading its body; the owner authorizer allows nothing on an IRI with no stored resource; and the refusal it raised was the forbidden one. So in open mode, where nothing needs authentication, every create in a missing container was `401`, and with `lws.mask-forbidden-as-not-found=false` the owner was told `403`. The pre-body check now refuses a write into a container that is not there as absent, as the service does, so the answer is `404` wherever the client may know; an anonymous client of a closed storage is still `401`, as for any resource it may not read. The rest held: errors are RFC 9457 problem details, a `401` carries the challenges and the storage link, and a client without Read is told `404` for `403` (`lws.mask-forbidden-as-not-found`, default on since the August remediation), which the new MAY covers. New test `createInAMissingContainerIsTargetNotFound` (the core's example and the note), run in the open, owner and new unmasked-owner (`OperationsConformanceUnmaskedOwnerTest`) postures; without the fix it fails in two of them, `401` and `403` |
+| #281 (9 Nov) | Section references made dynamic; the IANA registrations cite the core's Authorization section instead of "Section 5 of LWS-Auth" | None |
+| #298 (9 Nov) | The SAML example's closing `</ds:Signature>` | None |
+| #300, #302 | The preview's TODO link, CI actions | None |
+
+**Touchstone.** Touchstone master `14f315e` (D-0111, the same editions: 219 tests, the two
+create-in-missing-container tests retired with the keyword) ran against this server's master
+`aef56f2`, before the fix, on vulcan's `docker-lws-server` target the same day. Run `41876d7c`: 204
+passed, 0 failed, 15 inapplicable, conformant, test for test as under the 19 October definitions.
+`status-404-instead-of-403` (MAY) and `error-rfc9457-problem-details` (SHOULD) pass. Touchstone
+plays the owner with masking on, so it could not see the fault above. The 15 inapplicable tests
+depend on configuration: linkset `PUT` is supported; moves do not preserve identifiers and include
+containers; the target declares no harness-issued tokens and no SAML trust; bob's read of a
+container reaches its members; pages hold four items; a type search names no `Content-Location`;
+and bob's subscriptions from earlier runs fill two pages.
+
+**The LWS test suite.** `lws-contrib/lws-test-suite` was reset on 19 October. At `7a2ba98` it is one
+manifest, `lws10/manifest.ttl`, of 39 declarative HTTP tests for a storage that needs no
+authentication (contributed with LWS.net), and it has no runner. It was run in open mode with a
+small interpreter of its vocabulary. Before the fix, 37 passed and 2 failed:
+`createInMissingContainerReturnsNotFound` (`401`, the fault above) and
+`deleteReturns999IntentionallyFailing`, which asserts status 999 on purpose. After the fix, 38
+passed and only the deliberate failure remained.
+
+**The bundled context's bytes.** A checkout with `core.autocrlf=true` (Windows git) had rewritten
+`contexts/lws-v1.jsonld` with CRLF line endings. A jar built from such a tree carries a file that is
+not the Working Group's build (sha256 `193f5cb4…` for `b2dda589…`, divergence 9), and
+`JsonLdContextPolicyTest` fails. `.gitattributes` now leaves the bundled contexts' line endings alone.
+
+**Open upstream pull requests** that would change what a storage server does (not part of the
+specifications as of 9 November):
+
+| PR | Proposes | This server today |
+|---|---|---|
+| #299 | The core's OAuth sections extracted into a separate, required `lws10-oauth` profile | Would move the requirements cited under [Authorization](#authorization); not yet reviewed for behaviour changes |
+| #277 | Media type and size per representation in container listings | One `format` and one `size` per item |
+| #260 | The index services' types in the LWS JSON-LD context | The bundled context is the Working Group's build of `vocabulary.yml` (divergence 9); would take a new copy |
+| #301 | `invalid_token` in the token-validation example | Already what a refused token gets |
+| #284 | An HTTP Streaming notification suite (draft) | Not implemented |
+| #113 | Auxiliary resources and a manifest | Not implemented |
 
 ## Re-review of 19 October 2026
 
@@ -134,6 +187,7 @@ what the server does about it now.
 | #256 (19 Oct) — RFC 9728 for discovery | `resource_metadata` in place of `as_uri`/`realm`; protected resource metadata naming the authorization servers; the token's `resource` and `aud` are the storage the `401` links to; `aud` *includes* the storage | **Implemented**; `as_uri`/`realm` still sent too unless `lws.oauth.legacy-challenge=false` |
 | #253 (19 Oct) — the LWS profile | Only `lws+json` required on containers; RDF in the profile isomorphic to it, the profile in `Content-Type` | **Implemented**; container RDF derived from the `lws+json` page |
 | #237 (19 Oct) — moving resources | `MoveResource`; an `up` change moves the resource or is refused; atomic, authorized as delete + create; `Move` activity | **Implemented**, `preservesIdentifier: false` |
+| #263 (23 Oct) — Target Not Found | A create in a missing container is the *Target Not Found* outcome, `404`; the status table's `401`/`403`/`404`; `404` MAY stand for `403` | **Fixed**: the pre-body check had answered it `401` in open mode and `403` to an unmasked owner |
 
 ## LWS Core
 
@@ -178,6 +232,8 @@ what the server does about it now.
 | LWS profile: an RDF media type with `profile="https://www.w3.org/ns/lws/v1"` is answered RDF isomorphic to the `lws+json` of the same state and page, with the profile in `Content-Type` | Yes: Turtle, N-Triples, RDF/XML, TriG, N-Quads and `ld+json`, derived from the `lws+json` page with the bundled context; a range naming another profile matches nothing |
 | Pagination: `first` MUST, `next` when more, opaque links, `200` | Yes (`?page=N`) |
 | Create with `POST`; `Link: <…lws#Container>; rel="type"` for a container; `201` + `Location`; `up`, `linkset` (with `type`), `type` links | Yes |
+| A create in a container that does not exist reports *Target Not Found*, `404` (#263); a create adds one resource to one existing container | Yes, for `POST` and `PUT`, with RFC 9457 details; nothing is created on the way (before 9 November only with masking on; see the re-review) |
+| Status table: `401` Unknown Requester (`WWW-Authenticate`), `403` Not Permitted, `404` Target Not Found, optional RFC 9457 details; `404` MAY stand for `403` to hide a resource | Yes; every error is `application/problem+json`. An authenticated client without Read is told `404` (`lws.mask-forbidden-as-not-found`, default `true`); an anonymous one `401` |
 | Read: range requests, `ETag`, `Link`s, `HEAD` | Yes |
 | Update: `PUT`/`PATCH`; JSON Patch MUST be supported (#255; JSON Merge Patch before it) | JSON resources and linksets: yes, and merge patch as well. RDF resources: refused (divergence 2) |
 | `Prefer: set-linkset` | Yes |
