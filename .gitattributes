@@ -1,0 +1,4 @@
+# The bundled JSON-LD contexts are served exactly as published and pinned by their SHA-256
+# (JsonLdContextPolicyTest): never convert their line endings, or a checkout with
+# core.autocrlf=true builds a different file than the one the Working Group published.
+src/main/resources/contexts/*.jsonld -text
